@@ -9,16 +9,17 @@ python visualize.py
 # record every single tick — full temporal resolution
 python visualize.py --sample-every 1 --ticks 300
 
-# coarser view, longer run
-python visualize.py --sample-every 25 --ticks 2000
-
 # denser start (less empty space, faster cluster formation)
 python visualize.py --initial-cells 100 --ticks 600
+
+# MVG extension: test environment fluctuation
+python visualize.py --task-flip-period 100 --initial-cells 100 --ticks 600
 """
 
 import argparse
 from src.simulation import Simulation
 from src.visualizer import launch_viewer
+from src.environment import BASE_REWARD, SIMPLE_REWARD, COMPLEX_REWARD, TRIPLE_REWARD, DEFECTOR_DRAIN, COOP_COST, REPULSION_RADIUS
 
 
 def main() -> None:
@@ -39,7 +40,15 @@ def main() -> None:
                         help="RNG seed for reproducibility (default: 42)")
     parser.add_argument("--quiet",          action="store_true",
                         help="Suppress per-tick console output")
+    
+    # New MVG Extension Argument
+    parser.add_argument("--task-flip-period", type=int, default=None,
+                        help="Ticks between environmental task structure flips (MVG extension)")
+    
     args = parser.parse_args()
+
+    # Formatted terminal output for the new argument
+    flip_status = f"  task_flip_period={args.task_flip_period}" if args.task_flip_period else "  task_flip_period=None (Static)"
 
     print(
         f"Multicellularity Simulation\n"
@@ -48,14 +57,17 @@ def main() -> None:
         f"ticks={args.ticks}  "
         f"sample_every={args.sample_every}  "
         f"seed={args.seed}\n"
+        f"{flip_status}\n"
         f"{'─' * 75}"
     )
 
+    # Pass the new parameter into the Simulation instantiation
     sim = Simulation(
         grid_size=args.grid_size,
         initial_cells=args.initial_cells,
         mutation_rate=args.mutation_rate,
         seed=args.seed,
+        task_flip_period=args.task_flip_period,
     )
 
     original_print = sim._print_stats
@@ -79,6 +91,15 @@ def main() -> None:
         snapshots=sim.history,
         grid_width=args.grid_size,
         grid_height=args.grid_size,
+        cell_radius=REPULSION_RADIUS,
+        reward_params={
+            "base":     BASE_REWARD,
+            "simple":   SIMPLE_REWARD,
+            "complex":  COMPLEX_REWARD,
+            "triple":   TRIPLE_REWARD,
+            "drain":    DEFECTOR_DRAIN,
+            "coop_cost": COOP_COST,
+        },
     )
 
 

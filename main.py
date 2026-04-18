@@ -5,7 +5,7 @@ def main() -> None:
     sim = Simulation(
         grid_size=50,
         initial_cells=40,
-        mutation_rate=0.02,
+        mutation_rate=0.01,
         seed=42,
     )
     print("Multicellularity Simulation")

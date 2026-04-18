@@ -25,31 +25,42 @@ class Cluster:
 
     # ── computation ─────────────────────────────────────────────────────────
 
-    def can_complete_task(self) -> bool:
-        has_and = any(c.is_cooperator and c.operation == "AND" for c in self.cells)
-        has_xor = any(c.is_cooperator and c.operation == "XOR" for c in self.cells)
-        return has_and and has_xor
+    def can_complete_task(self, op1: str, op2: Optional[str] = None, op3: Optional[str] = None) -> bool:
+        has_op1 = any(c.is_cooperator and c.operation == op1 for c in self.cells)
+        if op2 is None:
+            return has_op1
+        has_op2 = any(c.is_cooperator and c.operation == op2 for c in self.cells)
+        if op3 is None:
+            return has_op1 and has_op2
+        has_op3 = any(c.is_cooperator and c.operation == op3 for c in self.cells)
+        return has_op1 and has_op2 and has_op3
 
-    def compute_task(self, a: int, b: int, c: int) -> Optional[int]:
-        """
-        Two-step division of labour:
-          step 1 — AND cooperator computes  a AND b  → intermediate
-          step 2 — XOR cooperator computes  intermediate XOR c  → output
-        Only cooperators (is_cooperator=True) contribute; defectors free-ride.
-        Returns None when the cluster lacks the required pair.
-        """
-        and_cell = next(
-            (cell for cell in self.cells if cell.is_cooperator and cell.operation == "AND"),
-            None,
-        )
-        xor_cell = next(
-            (cell for cell in self.cells if cell.is_cooperator and cell.operation == "XOR"),
-            None,
-        )
-        if and_cell is None or xor_cell is None:
+    def compute_task(
+        self,
+        a: int, b: int, c: int,
+        op1: str, op2: Optional[str] = None, op3: Optional[str] = None,
+        d: int = 0,
+    ) -> Optional[int]:
+        """1-, 2-, or 3-step task. Each step requires a cooperator with the matching operation."""
+        cell1 = next((cell for cell in self.cells if cell.is_cooperator and cell.operation == op1), None)
+        if cell1 is None:
             return None
-        intermediate = and_cell.compute(a, b)
-        return xor_cell.compute(intermediate, c)
+        result1 = cell1.compute(a, b)
+        if op2 is None:
+            return result1
+
+        cell2 = next((cell for cell in self.cells if cell.is_cooperator and cell.operation == op2), None)
+        if cell2 is None:
+            return None
+        result2 = cell2.compute(result1, c)
+        if op3 is None:
+            return result2
+
+        cell3 = next((cell for cell in self.cells if cell.is_cooperator and cell.operation == op3), None)
+        if cell3 is None:
+            return None
+        return cell3.compute(result2, d)
+    
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 

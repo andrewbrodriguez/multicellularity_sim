@@ -17,7 +17,7 @@ _OP_MAP = {
     (1, 1): "NAND",
 }
 
-ADHESION_COST = 0.3   # metabolic penalty per tick for expressing adhesion
+ADHESION_COST = 0.1   # metabolic penalty per tick for expressing adhesion
 
 
 def _apply_op(op: str, a: int, b: int) -> int:
