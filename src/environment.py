@@ -34,22 +34,25 @@ from .cell import Cell
 from .cluster import Cluster
 
 # ── physics ───────────────────────────────────────────────────────────────────
-BROWNIAN_SIGMA      = 0.05
-REPULSION_RADIUS    = 0.5
-REPULSION_STRENGTH  = 10.0
-ADHESION_REST_DIST  = 0.75   # just above REPULSION_RADIUS — bonded cells sit nearly touching
+BROWNIAN_SIGMA      = 0.1
+REPULSION_RADIUS    = 1.0
+REPULSION_STRENGTH  = 20.0
+ADHESION_REST_DIST  = 1.25   # just above REPULSION_RADIUS — bonded cells sit nearly touching
 ADHESION_SPRING_K   = 0.40   # must be <0.5 for Euler stability
-MAX_FORCE           = 2.0
+MAX_FORCE           = 4.0
 
 # ── biology ───────────────────────────────────────────────────────────────────
-MAX_CELL_AGE        = 300    # slower generational turnover
-GRACE_PERIOD        = 60     # more time before starvation check kicks in
-SURVIVAL_RATE       = 0.04   # minimum fitness/age ratio to avoid starvation
+MAX_CELL_AGE        = 500    # longer lifespan — cells persist through lean patches
+GRACE_PERIOD        = 120    # more time before starvation check kicks in
+SURVIVAL_RATE       = 0.02   # minimum fitness/age ratio to avoid starvation
 
-BASE_REWARD     = 0.2    # survival stipend for lone cells that can't complete any task
-SIMPLE_REWARD   = 2.0    # reward for completing a 1-step task (single cell or cluster)
-COMPLEX_REWARD  = 5.0    # reward for completing a 2-step task (requires ≥2 cooperators)
-TRIPLE_REWARD   = 10.0    # reward for completing a 3-step task (requires ≥3 cooperators)
+COOP_REWARD_SCALE = 0.15  # global multiplier on all regional vector values (vector entries sum to 15,
+                          # so max single-task reward = 15 × scale; tune this to adjust cooperation incentive)
+
+BASE_REWARD     = 0.2    # survival stipend — NOT scaled, stays as absolute floor
+SIMPLE_REWARD   = 2.0    # kept for reference; actual rewards now come from scaled vector entries
+COMPLEX_REWARD  = 7.0
+TRIPLE_REWARD   = 15.0
 
 # Task-complexity sampling weights [1-step, 2-step, 3-step].
 # 1-step tasks are most common; 3-step tasks are rare but lucrative.
@@ -68,11 +71,22 @@ CLUSTER_REPL_COOLDOWN = 50   # ticks between cluster replications
 LONE_REPL_PROB      = 0.10   # stochastic: probability of actually dividing each tick when ready
 CLUSTER_REPL_PROB   = 0.05   # stochastic: probability of cluster dividing each tick when ready
 
-MAX_CLUSTER_SIZE    = 12   # larger clusters → more room for defectors to accumulate
-MAX_CELLS           = 900
+MAX_CLUSTER_SIZE    = 12
+MAX_CELLS           = 10_000
 ADHESION_BOND_PROB  = 0.20
-ADHESION_FORM_RADIUS = 1.2  # cells must be physically close to form a bond
-ADHESION_SNAP_DIST  = 1.8   # bond snaps at ~2.5× REST_DIST
+ADHESION_FORM_RADIUS = 1.2
+ADHESION_SNAP_DIST  = 1.8
+
+REGION_SIZE         = 10    # world-unit side length of each spatial task tile
+
+# Ordered list of all 12 task tuples — index into the regional reward vector
+ALL_TASKS: List[tuple] = [
+    ("AND",), ("OR",), ("XOR",), ("NAND",),                          # 1-step (indices 0-3)
+    ("AND", "XOR"), ("NAND", "OR"), ("OR", "AND"), ("XOR", "NAND"),  # 2-step (indices 4-7)
+    ("AND", "OR", "XOR"), ("OR", "NAND", "AND"),                     # 3-step (indices 8-11)
+    ("XOR", "AND", "OR"),  ("NAND", "XOR", "AND"),
+]
+_OP_TO_IDX = {"AND": 0, "OR": 1, "XOR": 2, "NAND": 3}  # 1-step op → vector index
 
 
 class Environment:
@@ -103,54 +117,36 @@ class Environment:
                     ("XOR", "AND", "OR"),  ("NAND", "XOR", "AND")],
             }
 
-            # Three simultaneously active tasks; guaranteed to be distinct
-            self.current_task_a = self._sample_task()
-            self.current_task_b = self._sample_task()
-            while self.current_task_b == self.current_task_a:
-                self.current_task_b = self._sample_task()
-            self.current_task_c = self._sample_task()
-            while self.current_task_c in (self.current_task_a, self.current_task_b):
-                self.current_task_c = self._sample_task()
-
-            self._refresh_env()
+            # Spatial reward landscape — fixed at startup
+            self._generate_regional_rewards()
 
     # ── environment inputs ────────────────────────────────────────────────────
 
-    def _sample_task(self) -> tuple:
-        """Pick a random task state weighted by step count (1-step most likely)."""
-        steps = random.choices([1, 2, 3], weights=TASK_STEP_WEIGHTS)[0]
-        return random.choice(self._task_pool[steps])
+    def _generate_regional_rewards(self) -> None:
+        """
+        Each tile gets a reward vector of length 12 (one entry per task in ALL_TASKS)
+        with integer values summing to 15, drawn from a Dirichlet-Multinomial:
+          θ ~ Dirichlet(α=0.5)   ← sparse prior → regions specialise in a few tasks
+          v ~ Multinomial(15, θ)
+        """
+        n_rows = max(1, int(np.ceil(self.width  / REGION_SIZE)))
+        n_cols = max(1, int(np.ceil(self.height / REGION_SIZE)))
+        n_tasks = len(ALL_TASKS)
+        alpha = np.full(n_tasks, 0.5)
+        self.regional_rewards = np.zeros((n_rows, n_cols, n_tasks), dtype=np.float32)
+        for r in range(n_rows):
+            for c in range(n_cols):
+                probs = np.random.dirichlet(alpha)
+                self.regional_rewards[r, c] = np.random.multinomial(15, probs).astype(np.float32)
 
-    def _compute_target(self, state: tuple) -> int:
-        if len(state) == 1:
-            return _apply_op(state[0], self.env_a, self.env_b)
-        if len(state) == 2:
-            return _apply_op(state[1], _apply_op(state[0], self.env_a, self.env_b), self.env_c)
-        inter = _apply_op(state[1], _apply_op(state[0], self.env_a, self.env_b), self.env_c)
-        return _apply_op(state[2], inter, self.env_d)
-
-    def _task_reward(self, state: tuple) -> float:
-        return {1: SIMPLE_REWARD, 2: COMPLEX_REWARD, 3: TRIPLE_REWARD}[len(state)]
-
-    def _refresh_env(self) -> None:
-            self.env_a = random.randint(0, 255)
-            self.env_b = random.randint(0, 255)
-            self.env_c = random.randint(0, 255)
-            self.env_d = random.randint(0, 255)
-
-            # MVG: re-sample all three task slots independently (guaranteed distinct)
-            if self.task_flip_period and self.tick_count > 0 and self.tick_count % self.task_flip_period == 0:
-                self.current_task_a = self._sample_task()
-                self.current_task_b = self._sample_task()
-                while self.current_task_b == self.current_task_a:
-                    self.current_task_b = self._sample_task()
-                self.current_task_c = self._sample_task()
-                while self.current_task_c in (self.current_task_a, self.current_task_b):
-                    self.current_task_c = self._sample_task()
-
-            self.task_target_a = self._compute_target(self.current_task_a)
-            self.task_target_b = self._compute_target(self.current_task_b)
-            self.task_target_c = self._compute_target(self.current_task_c)
+    def _get_regional_rewards(self, pos: Tuple[float, float]) -> np.ndarray:
+        """Return the (12,) reward vector for the tile containing pos."""
+        x, y   = pos
+        n_rows = self.regional_rewards.shape[0]
+        n_cols = self.regional_rewards.shape[1]
+        row = min(int(x / REGION_SIZE), n_rows - 1)
+        col = min(int(y / REGION_SIZE), n_cols - 1)
+        return self.regional_rewards[row, col]
 
     # ── placement helpers ─────────────────────────────────────────────────────
 
@@ -183,16 +179,8 @@ class Environment:
     
     @property
     def current_task_str(self) -> str:
-        def fmt(s: tuple) -> str:
-            if len(s) == 1: return f"A {s[0]} B"
-            if len(s) == 2: return f"(A {s[0]} B) {s[1]} C"
-            return f"((A {s[0]} B) {s[1]} C) {s[2]} D"
-        a, b, c = self.current_task_a, self.current_task_b, self.current_task_c
-        return (
-            f"{fmt(a)} (+{self._task_reward(a):.0f})  |  "
-            f"{fmt(b)} (+{self._task_reward(b):.0f})  |  "
-            f"{fmt(c)} (+{self._task_reward(c):.0f})"
-        )
+        nr, nc = self.regional_rewards.shape[:2]
+        return f"Reward vectors ({nr}×{nc} tiles, {REGION_SIZE}wu, Σ=15 each)"
 
     def find_empty_position(self, seeding: bool = False) -> Tuple[float, float]:
         rand_fn = self._rand_pos_seeding if seeding else self._rand_pos
@@ -395,32 +383,31 @@ class Environment:
         return [c for c in self.cells.values() if c.cluster_id is None]
 
     def _eval_lone_cell(self, cell: Cell) -> float:
-        # Lone adhesive cells pay 25% of full bond cost — cheaper when not actively bonded.
         lone_cost = cell.adhesion_cost * 0.25
-        # Task-solving cooperators earn SIMPLE_REWARD if they can personally complete
-        # at least one of the two currently active 1-step tasks.
-        if cell.is_cooperator:
-            for state in (self.current_task_a, self.current_task_b, self.current_task_c):
-                if len(state) == 1 and cell.operation == state[0]:
-                    return max(0.0, SIMPLE_REWARD - lone_cost)
+        if cell.is_cooperator and cell.position is not None:
+            rvec   = self._get_regional_rewards(cell.position)
+            r_val  = float(rvec[_OP_TO_IDX[cell.operation]]) * COOP_REWARD_SCALE
+            if r_val > 0:
+                return max(0.0, r_val - lone_cost)
         return max(0.0, BASE_REWARD - lone_cost)
 
     def _eval_cluster(self, cluster: Cluster) -> None:
+        positioned = [c for c in cluster.cells if c.position is not None]
+        if not positioned:
+            return
+        cx   = float(np.mean([c.position[0] for c in positioned]))
+        cy   = float(np.mean([c.position[1] for c in positioned]))
+        rvec = self._get_regional_rewards((cx, cy))
+
         total_gross = 0.0
-        for state, target in (
-            (self.current_task_a, self.task_target_a),
-            (self.current_task_b, self.task_target_b),
-            (self.current_task_c, self.task_target_c),
-        ):
-            op1 = state[0]
-            op2 = state[1] if len(state) > 1 else None
-            op3 = state[2] if len(state) > 2 else None
-            result = cluster.compute_task(
-                self.env_a, self.env_b, self.env_c, op1, op2, op3=op3, d=self.env_d
-            )
-            if result is not None and result == target:
-                gross = max(0.0, self._task_reward(state) - DEFECTOR_DRAIN * cluster.defector_count)
-                total_gross += gross
+        for i, task in enumerate(ALL_TASKS):
+            if rvec[i] == 0:
+                continue
+            op1 = task[0]
+            op2 = task[1] if len(task) > 1 else None
+            op3 = task[2] if len(task) > 2 else None
+            if cluster.can_complete_task(op1, op2, op3):
+                total_gross += max(0.0, float(rvec[i]) * COOP_REWARD_SCALE - DEFECTOR_DRAIN * cluster.defector_count)
 
         if total_gross > 0:
             per_cell = total_gross / cluster.size
@@ -429,7 +416,6 @@ class Environment:
                 cell.fitness += max(0.0, per_cell - cell.adhesion_cost - coop_cost)
             cluster.fitness += total_gross
         else:
-            # Cluster earned nothing — cells fall back to survival stipend only
             for cell in cluster.cells:
                 cell.fitness += max(0.0, BASE_REWARD - cell.adhesion_cost * 0.25)
 
@@ -459,14 +445,10 @@ class Environment:
             return
         if cell.fitness < LONE_REPL_THRESH:
             return
-        # Defectors replicate freely (cheat strategy doesn't depend on task).
-        # Cooperators must be able to personally complete at least one active 1-step task.
+        # Defectors replicate freely; cooperators need ≥1 reward point for their op in this region.
         if not cell.is_defector:
-            can_solve = any(
-                len(s) == 1 and cell.is_cooperator and cell.operation == s[0]
-                for s in (self.current_task_a, self.current_task_b, self.current_task_c)
-            )
-            if not can_solve:
+            rvec = self._get_regional_rewards(cell.position)
+            if float(rvec[_OP_TO_IDX[cell.operation]]) < 1.0:
                 return
         # Stochastic gate: division timing has biological noise
         if random.random() > LONE_REPL_PROB:
@@ -516,8 +498,6 @@ class Environment:
 
     def tick(self) -> None:
         self.tick_count += 1
-        self._refresh_env()
-
         self._apply_forces()
         self._snap_broken_bonds()
 
@@ -541,10 +521,18 @@ class Environment:
             if cell.cell_id not in self.cells:
                 continue
             if cell.age >= MAX_CELL_AGE:
-                self.kill_cell(cell)
+                # Old-age death: probability ramps from 0 at MAX_CELL_AGE to 1 at 1.5× that age
+                p_age = (cell.age - MAX_CELL_AGE) / (MAX_CELL_AGE * 0.5)
+                if random.random() < min(p_age, 1.0):
+                    self.kill_cell(cell)
                 continue
-            if cell.age > GRACE_PERIOD and (cell.fitness / cell.age) < SURVIVAL_RATE:
-                self.kill_cell(cell)
+            if cell.age > GRACE_PERIOD:
+                deficit = SURVIVAL_RATE - (cell.fitness / cell.age)
+                if deficit > 0:
+                    # Starvation: probability scales with how far below the threshold
+                    p_starve = min(deficit / SURVIVAL_RATE, 1.0) * 0.15
+                    if random.random() < p_starve:
+                        self.kill_cell(cell)
 
         for cell in list(self._lone_cells()):
             if cell.cell_id in self.cells:

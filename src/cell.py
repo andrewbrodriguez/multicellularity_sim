@@ -78,9 +78,24 @@ class Cell:
         self.age += 1
 
     def mutate(self) -> "Cell":
+        # Asymmetric mutation on the cooperator bit: cheating is biologically
+        # easier to evolve than cooperation, so the genetic filter must be
+        # strong enough to overcome a 2×/0.3× bias toward defection.
         new_genome = self.genome.copy()
-        flip_mask = np.random.random(GENOME_LENGTH) < self.mutation_rate
-        new_genome[flip_mask] ^= 1
+
+        if new_genome[COOPERATOR] == 1:
+            if np.random.random() < self.mutation_rate * 2.0:
+                new_genome[COOPERATOR] = 0
+        else:
+            if np.random.random() < self.mutation_rate * 0.3:
+                new_genome[COOPERATOR] = 1
+
+        for i in range(GENOME_LENGTH):
+            if i == COOPERATOR:
+                continue
+            if np.random.random() < self.mutation_rate:
+                new_genome[i] ^= 1
+
         return Cell(genome=new_genome, parent_id=self.cell_id,
                     mutation_rate=self.mutation_rate)
 

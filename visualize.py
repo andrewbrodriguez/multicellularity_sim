@@ -30,7 +30,7 @@ def main() -> None:
                         help="Width and height of the 2-D spatial grid (default: 50)")
     parser.add_argument("--initial-cells",  type=int,   default=40,
                         help="Starting cell count (default: 40)")
-    parser.add_argument("--mutation-rate",  type=float, default=0.02,
+    parser.add_argument("--mutation-rate",  type=float, default=0.005,
                         help="Per-bit flip probability per replication (default: 0.02)")
     parser.add_argument("--ticks",          type=int,   default=500,
                         help="Total simulation ticks to run (default: 500)")
@@ -92,6 +92,7 @@ def main() -> None:
         grid_width=args.grid_size,
         grid_height=args.grid_size,
         cell_radius=REPULSION_RADIUS,
+        regional_tasks=sim.env.regional_rewards,
         reward_params={
             "base":     BASE_REWARD,
             "simple":   SIMPLE_REWARD,
