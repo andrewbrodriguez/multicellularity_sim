@@ -29,17 +29,22 @@ from scipy.spatial import cKDTree
 from typing import Dict, List, Optional, Tuple
 from .cell import Cell, _apply_op
 from .cluster import Cluster
+from . import physics_taichi as _ti_physics
 
 from .cell import Cell
 from .cluster import Cluster
 
-# ── physics ───────────────────────────────────────────────────────────────────
-BROWNIAN_SIGMA      = 0.1
-REPULSION_RADIUS    = 1.0
-REPULSION_STRENGTH  = 20.0
-ADHESION_REST_DIST  = 1.25   # just above REPULSION_RADIUS — bonded cells sit nearly touching
-ADHESION_SPRING_K   = 0.40   # must be <0.5 for Euler stability
-MAX_FORCE           = 4.0
+# ── physics (all distances in µm; world = 1000×1000 µm = 1mm²) ───────────────
+BROWNIAN_SIGMA           = 1.0    # µm/tick thermal jitter
+REPULSION_RADIUS         = 8.0   # µm — cell diameter; lone cells repel within this distance
+CLUSTER_REPULSION_RADIUS = 5.0    # µm — tighter packing inside clusters (cells slightly overlap)
+REPULSION_STRENGTH       = 20.0
+ADHESION_REST_DIST       = 5.0    # µm — equilibrium center-to-center for bonded cells
+ADHESION_SPRING_K        = 0.90   # must be <0.5 for Euler stability
+MAX_INTERACTION_RADIUS   = 30.0   # µm — hard cutoff: no cell interacts with any other beyond this
+CLUSTER_ATTRACT_RADIUS   = 30.0   # µm — long-range inter-cluster attraction onset (≤ MAX_INTERACTION_RADIUS)
+CLUSTER_ATTRACT_STRENGTH = 0.8    # force amplitude drawing separate clusters together
+MAX_DISPLACEMENT         = 4.0    # µm/tick — hard cap on how far any cell can move per tick
 
 # ── biology ───────────────────────────────────────────────────────────────────
 MAX_CELL_AGE        = 500    # longer lifespan — cells persist through lean patches
@@ -73,11 +78,10 @@ CLUSTER_REPL_PROB   = 0.05   # stochastic: probability of cluster dividing each 
 
 MAX_CLUSTER_SIZE    = 12
 MAX_CELLS           = 10_000
-ADHESION_BOND_PROB  = 0.20
-ADHESION_FORM_RADIUS = 1.2
-ADHESION_SNAP_DIST  = 1.8
+ADHESION_BOND_PROB   = 0.20
+ADHESION_FORM_RADIUS = 10.0  # µm — slightly beyond touching; cells in range can bond
 
-REGION_SIZE         = 10    # world-unit side length of each spatial task tile
+REGION_SIZE          = 125    # µm — side length of each spatial reward tile (5×5 tiles in 250µm²)
 
 # Ordered list of all 12 task tuples — index into the regional reward vector
 ALL_TASKS: List[tuple] = [
@@ -124,20 +128,24 @@ class Environment:
 
     def _generate_regional_rewards(self) -> None:
         """
-        Each tile gets a reward vector of length 12 (one entry per task in ALL_TASKS)
-        with integer values summing to 15, drawn from a Dirichlet-Multinomial:
-          θ ~ Dirichlet(α=0.5)   ← sparse prior → regions specialise in a few tasks
-          v ~ Multinomial(15, θ)
+        Rewards are distributed ONLY across the 8 multi-step tasks (indices 4-11).
+        1-step tasks (indices 0-3) are always zero — no region rewards a single
+        operation, so lone cooperators and homogeneous clusters gain nothing beyond
+        BASE_REWARD. Genuine complementarity (≥2 distinct operations) is required.
         """
-        n_rows = max(1, int(np.ceil(self.width  / REGION_SIZE)))
-        n_cols = max(1, int(np.ceil(self.height / REGION_SIZE)))
-        n_tasks = len(ALL_TASKS)
-        alpha = np.full(n_tasks, 0.5)
+        n_rows   = max(1, int(np.ceil(self.width  / REGION_SIZE)))
+        n_cols   = max(1, int(np.ceil(self.height / REGION_SIZE)))
+        n_tasks  = len(ALL_TASKS)
+        # Only the 8 multi-step task slots get reward mass
+        MULTI_START = 4
+        n_multi  = n_tasks - MULTI_START
+        alpha    = np.full(n_multi, 0.05)
         self.regional_rewards = np.zeros((n_rows, n_cols, n_tasks), dtype=np.float32)
         for r in range(n_rows):
             for c in range(n_cols):
                 probs = np.random.dirichlet(alpha)
-                self.regional_rewards[r, c] = np.random.multinomial(15, probs).astype(np.float32)
+                counts = np.random.multinomial(15, probs).astype(np.float32)
+                self.regional_rewards[r, c, MULTI_START:] = counts
 
     def _get_regional_rewards(self, pos: Tuple[float, float]) -> np.ndarray:
         """Return the (12,) reward vector for the tile containing pos."""
@@ -189,7 +197,7 @@ class Environment:
         pos_arr = np.array([c.position for c in self.cells.values()])
         for _ in range(30):
             p = np.array(rand_fn())
-            if np.linalg.norm(pos_arr - p, axis=1).min() > 1.0:
+            if np.linalg.norm(pos_arr - p, axis=1).min() > REPULSION_RADIUS:
                 return (float(p[0]), float(p[1]))
         return rand_fn()
 
@@ -211,103 +219,84 @@ class Environment:
         if N == 0:
             return
 
+        pos  = np.array([c.position for c in cell_list], dtype=np.float64)
+        vel  = np.array([c.velocity  for c in cell_list], dtype=np.float64)
+        cids = np.array(
+            [c.cluster_id if c.cluster_id is not None else -1 for c in cell_list],
+            dtype=np.int32,
+        )
+
+        new_pos, new_vel = _ti_physics.step(pos, vel, cids, float(self.width), float(self.height))
+
+        for i, cell in enumerate(cell_list):
+            cell.position = (float(new_pos[i, 0]), float(new_pos[i, 1]))
+            cell.velocity = (float(new_vel[i, 0]), float(new_vel[i, 1]))
+
+    def _apply_forces_numpy_fallback(self) -> None:
+        """Original numpy/cKDTree implementation kept for reference / debugging."""
+        cell_list = list(self.cells.values())
+        N = len(cell_list)
+        if N == 0:
+            return
+
         pos    = np.array([c.position for c in cell_list], dtype=np.float64)
         forces = np.random.normal(0, BROWNIAN_SIGMA, (N, 2))
 
         if N > 1:
-            query_r = max(REPULSION_RADIUS, ADHESION_SNAP_DIST)
-            tree    = cKDTree(pos)
-            pairs   = tree.query_pairs(query_r, output_type='ndarray')
+            tree  = cKDTree(pos)
+            pairs = tree.query_pairs(MAX_INTERACTION_RADIUS, output_type='ndarray')
 
             if len(pairs):
                 ii, jj = pairs[:, 0], pairs[:, 1]
-                delta  = pos[jj] - pos[ii]                   # (P, 2)
-                d      = np.linalg.norm(delta, axis=1)        # (P,)
-
-                degen = d < 1e-9
+                delta  = pos[jj] - pos[ii]
+                d      = np.linalg.norm(delta, axis=1)
+                degen  = d < 1e-9
                 if degen.any():
                     delta[degen] = np.random.normal(0, 0.1, (degen.sum(), 2))
-                    d[degen] = np.maximum(
-                        np.linalg.norm(delta[degen], axis=1), 1e-9
-                    )
-
-                unit = delta / d[:, np.newaxis]               # (P, 2)
-
-                # repulsion
-                rep_m  = d < REPULSION_RADIUS
-                f_rep  = np.zeros(len(pairs))
-                f_rep[rep_m] = (
-                    REPULSION_STRENGTH * (1.0 - d[rep_m] / REPULSION_RADIUS) ** 2
+                    d[degen]     = np.maximum(np.linalg.norm(delta[degen], axis=1), 1e-9)
+                unit = delta / d[:, np.newaxis]
+                cids = np.array(
+                    [c.cluster_id if c.cluster_id is not None else -1 for c in cell_list]
                 )
+                same_cluster = (cids[ii] >= 0) & (cids[ii] == cids[jj])
+                rep_radius = np.where(same_cluster, CLUSTER_REPULSION_RADIUS, REPULSION_RADIUS)
+                rep_m = d < rep_radius
+                f_rep = np.zeros(len(pairs))
+                f_rep[rep_m] = REPULSION_STRENGTH * (1.0 - d[rep_m] / rep_radius[rep_m]) ** 2
                 fv_rep = f_rep[:, np.newaxis] * unit
                 np.add.at(forces, ii, -fv_rep)
                 np.add.at(forces, jj, +fv_rep)
-
-                # adhesion spring (same cluster, stretched beyond rest dist)
-                cids  = np.array(
-                    [c.cluster_id if c.cluster_id is not None else -1
-                     for c in cell_list]
-                )
-                same  = (cids[ii] >= 0) & (cids[ii] == cids[jj])
-                adh_m = same & (d > ADHESION_REST_DIST)
+                adh_m = same_cluster & (d > ADHESION_REST_DIST)
                 f_adh = np.zeros(len(pairs))
                 f_adh[adh_m] = ADHESION_SPRING_K * (d[adh_m] - ADHESION_REST_DIST)
                 fv_adh = f_adh[:, np.newaxis] * unit
                 np.add.at(forces, ii, +fv_adh)
                 np.add.at(forces, jj, -fv_adh)
+                diff_cluster = (
+                    (cids[ii] >= 0) & (cids[jj] >= 0) & (cids[ii] != cids[jj])
+                    & (d > REPULSION_RADIUS) & (d < CLUSTER_ATTRACT_RADIUS)
+                )
+                if diff_cluster.any():
+                    t = 1.0 - (d[diff_cluster] - REPULSION_RADIUS) / (CLUSTER_ATTRACT_RADIUS - REPULSION_RADIUS)
+                    fv = CLUSTER_ATTRACT_STRENGTH * t[:, np.newaxis] * unit[diff_cluster]
+                    np.add.at(forces, ii[diff_cluster], +fv)
+                    np.add.at(forces, jj[diff_cluster], -fv)
 
-        # clamp
         mags  = np.linalg.norm(forces, axis=1)
         safe  = np.maximum(mags, 1e-10)
-        scale = np.where(mags > MAX_FORCE, MAX_FORCE / safe, 1.0)
+        scale = np.where(mags > MAX_DISPLACEMENT, MAX_DISPLACEMENT / safe, 1.0)
         forces *= scale[:, np.newaxis]
+        pos   += forces
 
-        pos += forces
-
-        # ── elastic wall reflection (no wrapping) ────────────────────────────
         for axis, limit in ((0, self.width), (1, self.height)):
-            lo  = pos[:, axis] < 0.0
-            hi  = pos[:, axis] > limit
-            pos[lo, axis] =  -pos[lo, axis]
+            lo = pos[:, axis] < 0.0
+            hi = pos[:, axis] > limit
+            pos[lo, axis] = -pos[lo, axis]
             pos[hi, axis] = 2.0 * limit - pos[hi, axis]
-            # hard clamp in case of overshoots beyond far wall
             np.clip(pos[:, axis], 0.0, limit, out=pos[:, axis])
 
         for k, cell in enumerate(cell_list):
             cell.position = (float(pos[k, 0]), float(pos[k, 1]))
-
-    # ── bond snapping ─────────────────────────────────────────────────────────
-
-    def _snap_broken_bonds(self) -> None:
-        """
-        After physics, detach any cell that has drifted farther than
-        ADHESION_SNAP_DIST from every other member of its cluster.
-        Clusters reduced to ≤1 cell are disbanded.
-        """
-        for cl in list(self.clusters.values()):
-            if cl.cluster_id not in self.clusters:
-                continue
-            positioned = [c for c in cl.cells if c.position is not None]
-            if len(positioned) < 2:
-                continue
-            pos_arr = np.array([c.position for c in positioned])
-
-            to_detach = []
-            for i, cell in enumerate(positioned):
-                dists = np.linalg.norm(pos_arr - pos_arr[i], axis=1)
-                dists[i] = np.inf
-                if dists.min() > ADHESION_SNAP_DIST:
-                    to_detach.append(cell)
-
-            for cell in to_detach:
-                cl.remove_cell(cell)
-
-            # Disband if too small to cooperate
-            if cl.size <= 1:
-                for remaining in list(cl.cells):
-                    cl.remove_cell(remaining)
-                if cl.cluster_id in self.clusters:
-                    del self.clusters[cl.cluster_id]
 
     # ── adhesion formation ────────────────────────────────────────────────────
 
@@ -383,12 +372,10 @@ class Environment:
         return [c for c in self.cells.values() if c.cluster_id is None]
 
     def _eval_lone_cell(self, cell: Cell) -> float:
+        # Lone cells — including cooperators — earn only the survival stipend.
+        # Cooperation is only productive when a cluster has two or more cells
+        # with *different* operations; a lone cooperator contributes nothing.
         lone_cost = cell.adhesion_cost * 0.25
-        if cell.is_cooperator and cell.position is not None:
-            rvec   = self._get_regional_rewards(cell.position)
-            r_val  = float(rvec[_OP_TO_IDX[cell.operation]]) * COOP_REWARD_SCALE
-            if r_val > 0:
-                return max(0.0, r_val - lone_cost)
         return max(0.0, BASE_REWARD - lone_cost)
 
     def _eval_cluster(self, cluster: Cluster) -> None:
@@ -475,21 +462,23 @@ class Environment:
         ref = cluster.cells[0].position if cluster.cells else self._rand_pos()
         if ref is None:
             return
-        if len(self.cells) >= MAX_CELLS:
-            self._kill_weakest_near(ref)
-            if len(self.cells) >= MAX_CELLS:
-                return
+        # Need room for the whole offspring cluster; abort if not enough space
+        slots_needed = cluster.size
+        if len(self.cells) + slots_needed > MAX_CELLS:
+            return
         cluster.fitness -= CLUSTER_REPL_THRESH * cluster.size
         offspring = cluster.replicate()
-        # Place offspring in a tight ring so they stay within ADHESION_SNAP_DIST
-        # and the spring can pull them to ADHESION_REST_DIST immediately.
         n = len(offspring.cells)
+        placed = []
         for i, child_cell in enumerate(offspring.cells):
+            if len(self.cells) >= MAX_CELLS:
+                break
             angle = 2 * np.pi * i / max(n, 1)
             ox = float(np.clip(ref[0] + ADHESION_REST_DIST * np.cos(angle), 0.5, self.width  - 0.5))
             oy = float(np.clip(ref[1] + ADHESION_REST_DIST * np.sin(angle), 0.5, self.height - 0.5))
             self.place_cell(child_cell, (ox, oy))
-        if any(c.position is not None for c in offspring.cells):
+            placed.append(child_cell)
+        if placed:
             self.clusters[offspring.cluster_id] = offspring
         cluster.replication_cooldown   = CLUSTER_REPL_COOLDOWN
         offspring.replication_cooldown = CLUSTER_REPL_COOLDOWN
@@ -499,7 +488,6 @@ class Environment:
     def tick(self) -> None:
         self.tick_count += 1
         self._apply_forces()
-        self._snap_broken_bonds()
 
         for cell in self._lone_cells():
             cell.fitness += self._eval_lone_cell(cell)

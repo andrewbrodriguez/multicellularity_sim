@@ -190,6 +190,7 @@ def build_napari_data(
     bond_lines        : list of (2, 3) float32 arrays  [[t,x1,y1],[t,x2,y2]]
     """
     T  = len(snapshots)
+    # sx/sy only used for heatmap pixel rendering; points and bonds use world (µm) coords directly
     sx = VIS_RES / grid_width
     sy = VIS_RES / grid_height
 
@@ -199,8 +200,11 @@ def build_napari_data(
     sizes: Dict[int, List] = {0: [], 1: [], 2: []}
     bond_lines: List[np.ndarray] = []
 
-    _PT_SIZE_MIN = 3.0
-    _PT_SIZE_MAX = 9.0
+    # Sizes in µm — range from small (newborn) to larger (near division).
+    # 25% of the cell's physical 10 µm diameter gives ~2.5 µm, clearly visible
+    # without crowding at the 250 µm world scale.
+    _PT_SIZE_MIN = 0.75
+    _PT_SIZE_MAX = 2.25
 
     for t_idx, snap in enumerate(snapshots):
         records = snap.get("cell_records", [])
@@ -209,17 +213,17 @@ def build_napari_data(
             for rec in records:
                 x, y = rec["pos"]
                 t = rec["type"]
-                pts[t].append([float(t_idx), x * sx, y * sy])
+                # Store in world (µm) coords — matches the image layers which use scale=(µm/px)
+                pts[t].append([float(t_idx), x, y])
                 ecols[t].append(_OP_EDGE_RGBA.get(rec.get("op", "AND"), [1, 1, 1, 1]))
                 dp = rec.get("div_progress", 0.0)
                 sizes[t].append(_PT_SIZE_MIN + (_PT_SIZE_MAX - _PT_SIZE_MIN) * dp)
 
         # Adhesion bonds — nearest-neighbour edges within each cluster only.
-        # Lone cells (even adhesive ones) never appear here.
         for group in snap.get("cluster_groups", []):
             if len(group) < 2:
                 continue
-            pos = np.array(group, dtype=np.float32)   # (N, 2) world coords
+            pos = np.array(group, dtype=np.float32)   # (N, 2) world (µm) coords
             drawn: set = set()
             for i in range(len(pos)):
                 dists = np.linalg.norm(pos - pos[i], axis=1)
@@ -229,8 +233,8 @@ def build_napari_data(
                 if edge not in drawn:
                     drawn.add(edge)
                     bond_lines.append(np.array([
-                        [float(t_idx), pos[i][0] * sx, pos[i][1] * sy],
-                        [float(t_idx), pos[j][0] * sx, pos[j][1] * sy],
+                        [float(t_idx), pos[i][0], pos[i][1]],
+                        [float(t_idx), pos[j][0], pos[j][1]],
                     ], dtype=np.float32))
 
     points_by_type = {
@@ -445,6 +449,10 @@ def launch_viewer(
 
     viewer = napari.Viewer(title="Multicellularity Simulation")
 
+    # µm per pixel — napari spatial scale for 2D layers (time axis is handled by dims slider)
+    um_per_px = grid_width / VIS_RES   # e.g. 1000 µm / 400 px = 2.5 µm/px
+    spatial_scale = (um_per_px, um_per_px)
+
     # Set agarose background on the VisPy canvas (visible when zoomed out)
     try:
         viewer.window._qt_viewer.canvas.bgcolor = (
@@ -460,6 +468,7 @@ def launch_viewer(
         rgb=True,
         opacity=1.0,
         blending="opaque",
+        scale=spatial_scale,
     )
 
     # ── regional reward map (static — generated once at startup) ─────────────
@@ -471,7 +480,12 @@ def launch_viewer(
             rgb=True,
             opacity=0.7,
             blending="translucent",
+            scale=spatial_scale,
         )
+
+    # ── native scale bar ──────────────────────────────────────────────────────
+    viewer.scale_bar.visible = True
+    viewer.scale_bar.unit    = "µm"
 
     # ── adhesion bonds (clustered cells only) ─────────────────────────────────
     if bond_lines:
@@ -486,15 +500,15 @@ def launch_viewer(
         )
         bonds_layer.opacity = 0.70
 
-    # ── border rectangle (simulation wall) ───────────────────────────────────
-    border = np.array([[0, 0], [0, VIS_RES], [VIS_RES, VIS_RES], [VIS_RES, 0]], dtype=float)
+    # ── border rectangle (simulation wall) — in µm coords ────────────────────
+    border = np.array([[0, 0], [0, grid_height], [grid_width, grid_height], [grid_width, 0]], dtype=float)
     border_layer = viewer.add_shapes(
         [border],
         shape_type="rectangle",
         ndim=2,
         edge_color="#222222",
         face_color="transparent",
-        edge_width=6,
+        edge_width=2,
         name="Border",
     )
     border_layer.opacity = 0.85
@@ -512,7 +526,7 @@ def launch_viewer(
             face_color=face_color,
             edge_color=ecols,
             edge_width=0.05,
-            size=sizes_by_type[ctype],
+            size=sizes_by_type[ctype] * 3.5,
             symbol="disc",
             blending="translucent",
         )

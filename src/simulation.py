@@ -34,25 +34,29 @@ class Simulation:
         # Seed ~40% of cells as pre-formed clusters of 2-4 cooperators
         n_cluster_cells = int(n * 0.4)
         placed = 0
+        # All four operations as (OP_HIGH, OP_LOW) bit pairs
+        ALL_OPS = [(0, 0), (0, 1), (1, 0), (1, 1)]  # AND, OR, XOR, NAND
+
         while placed < n_cluster_cells:
             size = random.randint(2, 4)
             if placed + size > n_cluster_cells:
                 break
-            # All cooperators with the same random operation so they can contribute
-            op_bits = np.array([random.randint(0, 1), random.randint(0, 1)], dtype=np.uint8)
+            # Assign distinct operations to each cell — no two members share an op.
+            # This seeds genuine complementarity: the cluster can immediately attempt
+            # multi-step tasks that require different operations.
+            ops = random.sample(ALL_OPS, size)
             anchor = self.env.find_empty_position(seeding=True)
             cl = Cluster()
             for i in range(size):
                 genome = np.zeros(8, dtype=np.uint8)
-                genome[0], genome[1] = op_bits  # same operation
+                genome[0], genome[1] = ops[i]   # distinct operation per cell
                 genome[2] = 1                   # adhesion on
                 genome[3] = 1                   # cooperator
                 cell = Cell(genome=genome, mutation_rate=self.mutation_rate)
-                # Pack tightly around anchor within ADHESION_REST_DIST
                 angle = 2 * np.pi * i / size
                 pos = (
-                    float(np.clip(anchor[0] + 0.75 * np.cos(angle), 0.5, self.env.width  - 0.5)),
-                    float(np.clip(anchor[1] + 0.75 * np.sin(angle), 0.5, self.env.height - 0.5)),
+                    float(np.clip(anchor[0] + 8.0 * np.cos(angle), 0.5, self.env.width  - 0.5)),
+                    float(np.clip(anchor[1] + 8.0 * np.sin(angle), 0.5, self.env.height - 0.5)),
                 )
                 self.env.place_cell(cell, pos)
                 cl.add_cell(cell)

@@ -53,14 +53,16 @@ class Cell:
         self.fitness:              float = 0.0
         self.cluster_id:           Optional[int]             = None
         self.position:             Optional[Tuple[float, float]] = None
+        self.velocity:             Tuple[float, float]           = (0.0, 0.0)
         self.replication_cooldown: int   = 0
 
         self._parse_genome()
 
     def _parse_genome(self) -> None:
         self.operation:    str  = _OP_MAP[(int(self.genome[OP_HIGH]), int(self.genome[OP_LOW]))]
-        self.has_adhesion: bool = bool(self.genome[ADHESION])
         self.is_cooperator: bool = bool(self.genome[COOPERATOR])
+        # Cooperation requires physical contact — cooperators always express adhesion
+        self.has_adhesion: bool = bool(self.genome[ADHESION]) or self.is_cooperator
 
     # A defector: joins clusters via adhesion but withholds computation
     @property
