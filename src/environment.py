@@ -48,16 +48,24 @@ MAX_DISPLACEMENT         = 4.0    # µm/tick — hard cap on how far any cell ca
 
 # ── biology ───────────────────────────────────────────────────────────────────
 MAX_CELL_AGE        = 500    # longer lifespan — cells persist through lean patches
-GRACE_PERIOD        = 120    # more time before starvation check kicks in
+GRACE_PERIOD        = 20    # more time before starvation check kicks in
 SURVIVAL_RATE       = 0.02   # minimum fitness/age ratio to avoid starvation
 
-COOP_REWARD_SCALE = 0.15  # global multiplier on all regional vector values (vector entries sum to 15,
-                          # so max single-task reward = 15 × scale; tune this to adjust cooperation incentive)
+COOP_REWARD_SCALE = 0.1  # global multiplier on all regional vector values; tune to adjust cooperation incentive
 
 BASE_REWARD     = 0.2    # survival stipend — NOT scaled, stays as absolute floor
 SIMPLE_REWARD   = 2.0    # kept for reference; actual rewards now come from scaled vector entries
 COMPLEX_REWARD  = 7.0
 TRIPLE_REWARD   = 15.0
+
+# Reward mass distributed per tile, partitioned by task complexity.
+# Multi-step tasks carry more mass so cooperation through complementary
+# operations pays comfortably better than a lone cooperator's single op.
+#   max per-task fitness/tick ≈ MASS × coop_reward_scale
+# At default scale 0.15:  single ≈ 0.45,  double ≈ 1.20,  triple ≈ 0.90
+SINGLE_MASS = 3
+DOUBLE_MASS = 8
+TRIPLE_MASS = 12
 
 # Task-complexity sampling weights [1-step, 2-step, 3-step].
 # 1-step tasks are most common; 3-step tasks are rare but lucrative.
@@ -67,7 +75,7 @@ TASK_STEP_WEIGHTS = [0.55, 0.35, 0.10]
 #   cooperators pay COOP_COST for the shared computation
 #   each defector drains DEFECTOR_DRAIN from each task's gross reward
 COOP_COST           = 0.1    # metabolic cost paid ONLY by cooperators when cluster succeeds
-DEFECTOR_DRAIN      = 0.8    # per-defector drain applied to each completed task's gross reward
+DEFECTOR_DRAIN      = 1.5    # per-defector drain applied to each completed task's gross reward
 
 LONE_REPL_THRESH    = 28.0   # higher bar → slower lone-cell reproduction
 CLUSTER_REPL_THRESH = 18.0   # higher bar → slower cluster reproduction
@@ -81,7 +89,7 @@ MAX_CELLS           = 10_000
 ADHESION_BOND_PROB   = 0.20
 ADHESION_FORM_RADIUS = 10.0  # µm — slightly beyond touching; cells in range can bond
 
-REGION_SIZE          = 125    # µm — side length of each spatial reward tile (5×5 tiles in 250µm²)
+REGION_SIZE          = 100    # µm — side length of each spatial reward tile (5×5 tiles in 250µm²)
 
 # Ordered list of all 12 task tuples — index into the regional reward vector
 ALL_TASKS: List[tuple] = [
@@ -96,10 +104,13 @@ _OP_TO_IDX = {"AND": 0, "OR": 1, "XOR": 2, "NAND": 3}  # 1-step op → vector in
 class Environment:
     def __init__(
             self,
-            width: int = 250,
-            height: int = 250,
+            width: int = 500,
+            height: int = 500,
             seed: Optional[int] = None,
-            task_flip_period: Optional[int] = None,  # <-- New parameter
+            task_flip_period: Optional[int] = None,
+            coop_reward_scale: float = COOP_REWARD_SCALE,
+            task_alpha: float = 0.05,
+            coop_cost: float = COOP_COST,
         ) -> None:
             if seed is not None:
                 np.random.seed(seed)
@@ -110,8 +121,11 @@ class Environment:
             self.cells:    Dict[int, Cell]    = {}
             self.clusters: Dict[int, Cluster] = {}
             self.tick_count = 0
-            
-            self.task_flip_period = task_flip_period
+
+            self.task_flip_period   = task_flip_period
+            self.coop_reward_scale  = coop_reward_scale
+            self.task_alpha         = task_alpha
+            self.coop_cost          = coop_cost
 
             # Task pools, partitioned by complexity
             self._task_pool = {
@@ -128,24 +142,26 @@ class Environment:
 
     def _generate_regional_rewards(self) -> None:
         """
-        Rewards are distributed ONLY across the 8 multi-step tasks (indices 4-11).
-        1-step tasks (indices 0-3) are always zero — no region rewards a single
-        operation, so lone cooperators and homogeneous clusters gain nothing beyond
-        BASE_REWARD. Genuine complementarity (≥2 distinct operations) is required.
+        Rewards are distributed across all task tiers, but multi-step tasks
+        receive more mass than 1-step tasks so cooperation through complementary
+        operations pays comfortably better than a single cell's op alone:
+            1-step  (indices 0-3):  total mass per tile = SINGLE_MASS
+            2-step  (indices 4-7):  total mass per tile = DOUBLE_MASS
+            3-step  (indices 8-11): total mass per tile = TRIPLE_MASS
+        Within each tier, mass is distributed by Dirichlet(task_alpha) — low
+        alpha yields specialised tiles that reward only one task per tier.
         """
-        n_rows   = max(1, int(np.ceil(self.width  / REGION_SIZE)))
-        n_cols   = max(1, int(np.ceil(self.height / REGION_SIZE)))
-        n_tasks  = len(ALL_TASKS)
-        # Only the 8 multi-step task slots get reward mass
-        MULTI_START = 4
-        n_multi  = n_tasks - MULTI_START
-        alpha    = np.full(n_multi, 0.05)
+        n_rows  = max(1, int(np.ceil(self.width  / REGION_SIZE)))
+        n_cols  = max(1, int(np.ceil(self.height / REGION_SIZE)))
+        n_tasks = len(ALL_TASKS)
         self.regional_rewards = np.zeros((n_rows, n_cols, n_tasks), dtype=np.float32)
+        tiers = ((0, SINGLE_MASS), (4, DOUBLE_MASS), (8, TRIPLE_MASS))
         for r in range(n_rows):
             for c in range(n_cols):
-                probs = np.random.dirichlet(alpha)
-                counts = np.random.multinomial(15, probs).astype(np.float32)
-                self.regional_rewards[r, c, MULTI_START:] = counts
+                for start, mass in tiers:
+                    probs  = np.random.dirichlet(np.full(4, self.task_alpha))
+                    counts = np.random.multinomial(mass, probs).astype(np.float32)
+                    self.regional_rewards[r, c, start:start + 4] = counts
 
     def _get_regional_rewards(self, pos: Tuple[float, float]) -> np.ndarray:
         """Return the (12,) reward vector for the tile containing pos."""
@@ -372,11 +388,19 @@ class Environment:
         return [c for c in self.cells.values() if c.cluster_id is None]
 
     def _eval_lone_cell(self, cell: Cell) -> float:
-        # Lone cells — including cooperators — earn only the survival stipend.
-        # Cooperation is only productive when a cluster has two or more cells
-        # with *different* operations; a lone cooperator contributes nothing.
-        lone_cost = cell.adhesion_cost * 0.25
-        return max(0.0, BASE_REWARD - lone_cost)
+        # Lone cooperators *can* be productive on their own — they collect the
+        # 1-step task reward for their operation in the current tile, minus
+        # COOP_COST. Multi-step tasks carry more mass, so a lone cooperator
+        # always earns less than the same op pulling its weight inside a
+        # complementary cluster. Defectors get only the survival stipend.
+        base = max(0.0, BASE_REWARD - cell.adhesion_cost * 0.25)
+        if not cell.is_cooperator or cell.position is None:
+            return base
+        rvec = self._get_regional_rewards(cell.position)
+        task_mass = float(rvec[_OP_TO_IDX[cell.operation]])
+        if task_mass <= 0:
+            return base
+        return base + max(0.0, task_mass * self.coop_reward_scale - self.coop_cost)
 
     def _eval_cluster(self, cluster: Cluster) -> None:
         positioned = [c for c in cluster.cells if c.position is not None]
@@ -394,12 +418,12 @@ class Environment:
             op2 = task[1] if len(task) > 1 else None
             op3 = task[2] if len(task) > 2 else None
             if cluster.can_complete_task(op1, op2, op3):
-                total_gross += max(0.0, float(rvec[i]) * COOP_REWARD_SCALE - DEFECTOR_DRAIN * cluster.defector_count)
+                total_gross += max(0.0, float(rvec[i]) * self.coop_reward_scale - DEFECTOR_DRAIN * cluster.defector_count)
 
         if total_gross > 0:
             per_cell = total_gross / cluster.size
             for cell in cluster.cells:
-                coop_cost = COOP_COST if cell.is_cooperator else 0.0
+                coop_cost = self.coop_cost if cell.is_cooperator else 0.0
                 cell.fitness += max(0.0, per_cell - cell.adhesion_cost - coop_cost)
             cluster.fitness += total_gross
         else:

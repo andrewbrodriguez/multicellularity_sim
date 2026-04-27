@@ -46,9 +46,8 @@ MAX_DISPLACEMENT = 4.0     # µm/tick hard cap (our constraint)
 
 # ── spatial hash (§2.1): 10 µm grid cells, 11×11 neighbourhood ───────────────
 HASH_CELL      = 10.0   # µm — matches paper's 10 µm × 10 µm grid
-GRID_W         = 25     # ceil(250 / 10)
-GRID_H         = 25
-N_BUCKETS      = GRID_W * GRID_H   # 625
+MAX_GRID_DIM   = 200    # max buckets per axis → supports world up to 2000 µm/side
+MAX_BUCKETS    = MAX_GRID_DIM * MAX_GRID_DIM   # 40_000
 MAX_PER_BKT    = 32     # generous upper bound per bucket at our densities
 NBHD_HALF      = 5      # ±5 buckets → 11×11 = 110 µm neighbourhood
 MAX_CELLS      = 12_000   # headroom above environment.py MAX_CELLS=10_000 for burst replication
@@ -57,8 +56,8 @@ MAX_CELLS      = 12_000   # headroom above environment.py MAX_CELLS=10_000 for b
 _pos       = ti.Vector.field(2, dtype=ti.f32, shape=MAX_CELLS)
 _vel       = ti.Vector.field(2, dtype=ti.f32, shape=MAX_CELLS)  # persistent velocity
 _cid       = ti.field(dtype=ti.i32, shape=MAX_CELLS)            # cluster id; -1 = lone
-_bkt_count = ti.field(dtype=ti.i32, shape=N_BUCKETS)
-_bkt_cells = ti.field(dtype=ti.i32, shape=(N_BUCKETS, MAX_PER_BKT))
+_bkt_count = ti.field(dtype=ti.i32, shape=MAX_BUCKETS)
+_bkt_cells = ti.field(dtype=ti.i32, shape=(MAX_BUCKETS, MAX_PER_BKT))
 
 # numpy staging buffers (reused each tick to avoid reallocation)
 _pos_buf = np.zeros((MAX_CELLS, 2), dtype=np.float32)
@@ -70,26 +69,26 @@ _cid_buf = np.full(MAX_CELLS, -1,   dtype=np.int32)
 
 @ti.kernel
 def _clear_hash():
-    for b in range(N_BUCKETS):
+    for b in range(MAX_BUCKETS):
         _bkt_count[b] = 0
 
 
 @ti.kernel
-def _build_hash(n: int):
+def _build_hash(n: int, grid_w: int, grid_h: int):
     """Place each living cell into its 10 µm grid bucket (O(N), fully parallel)."""
     for i in range(n):
         gx = int(ti.floor(_pos[i][0] / HASH_CELL))
         gy = int(ti.floor(_pos[i][1] / HASH_CELL))
-        gx = ti.max(0, ti.min(gx, GRID_W - 1))
-        gy = ti.max(0, ti.min(gy, GRID_H - 1))
-        b  = gx * GRID_H + gy
+        gx = ti.max(0, ti.min(gx, grid_w - 1))
+        gy = ti.max(0, ti.min(gy, grid_h - 1))
+        b  = gx * grid_h + gy
         slot = ti.atomic_add(_bkt_count[b], 1)
         if slot < MAX_PER_BKT:
             _bkt_cells[b, slot] = i
 
 
 @ti.kernel
-def _update_velocity(n: int):
+def _update_velocity(n: int, grid_w: int, grid_h: int):
     """
     For each cell i, sum pairwise Gaussian forces from all neighbours
     within the 11×11 bucket neighbourhood (≤ 110 µm).
@@ -112,8 +111,8 @@ def _update_velocity(n: int):
             for dgy in ti.static(range(-NBHD_HALF, NBHD_HALF + 1)):
                 nx = gx + dgx
                 ny = gy + dgy
-                if 0 <= nx < GRID_W and 0 <= ny < GRID_H:
-                    b      = nx * GRID_H + ny
+                if 0 <= nx < grid_w and 0 <= ny < grid_h:
+                    b      = nx * grid_h + ny
                     n_in_b = _bkt_count[b]
                     for k in range(MAX_PER_BKT):
                         if k < n_in_b:
@@ -226,6 +225,14 @@ def step(
     if n > MAX_CELLS:
         raise RuntimeError(f"Cell count {n} exceeds physics_taichi.MAX_CELLS={MAX_CELLS}; raise the constant")
 
+    grid_w = int(np.ceil(world_w / HASH_CELL))
+    grid_h = int(np.ceil(world_h / HASH_CELL))
+    if grid_w > MAX_GRID_DIM or grid_h > MAX_GRID_DIM:
+        raise RuntimeError(
+            f"World {world_w}×{world_h} µm needs {grid_w}×{grid_h} buckets but "
+            f"MAX_GRID_DIM={MAX_GRID_DIM} (≈{MAX_GRID_DIM*HASH_CELL:.0f} µm/side); raise the constant"
+        )
+
     _pos_buf[:n] = positions.astype(np.float32)
     _vel_buf[:n] = velocities.astype(np.float32)
     _cid_buf[:n] = cluster_ids.astype(np.int32)
@@ -235,8 +242,8 @@ def step(
     _cid.from_numpy(_cid_buf)
 
     _clear_hash()
-    _build_hash(n)
-    _update_velocity(n)                                 # writes _vel
+    _build_hash(n, grid_w, grid_h)
+    _update_velocity(n, grid_w, grid_h)                 # writes _vel
     _update_position(n, float(world_w), float(world_h)) # reads _vel, writes _pos
 
     new_pos = _pos.to_numpy()[:n].astype(np.float64)

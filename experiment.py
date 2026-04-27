@@ -64,14 +64,71 @@ SWEEPS = {
         {"grid_size": 250},
         {"grid_size": 400},
     ],
+    # How much the cooperation reward multiplier affects the emergence of cooperation.
+    # x-axis: coop_reward_scale  →  y-axis: cooperator_pct at end of run.
+    "coop_bonus": [
+        {"coop_reward_scale": 0.02},
+        {"coop_reward_scale": 0.05},
+        {"coop_reward_scale": 0.10},
+        {"coop_reward_scale": 0.15},
+        {"coop_reward_scale": 0.25},
+        {"coop_reward_scale": 0.40},
+        {"coop_reward_scale": 0.60},
+        {"coop_reward_scale": 1.00},
+    ],
+    # How task specialisation across space shapes population composition.
+    # task_alpha is the Dirichlet concentration for reward distribution:
+    #   low  alpha (~0.01) → each tile rewards only 1–2 tasks (harsh specialisation)
+    #   high alpha (~5.0)  → all tasks equally rewarded everywhere (no spatial pressure)
+    # x-axis: task_alpha  →  y-axis: cooperator_pct, cluster diversity, etc.
+    "task_distribution": [
+        {"task_alpha": 0.01},
+        {"task_alpha": 0.05},
+        {"task_alpha": 0.10},
+        {"task_alpha": 0.25},
+        {"task_alpha": 0.50},
+        {"task_alpha": 1.00},
+        {"task_alpha": 2.00},
+        {"task_alpha": 5.00},
+    ],
+    # How the metabolic cost of cooperation shapes the fraction of cooperators.
+    # COOP_COST is paid each tick by cooperators in successful clusters.
+    # Low cost  → cooperation almost free; high cost → being a cooperator starves you.
+    # x-axis: coop_cost  →  y-axis: cooperator_pct, defector_pct, selection pressures.
+    "coop_cost": [
+        {"coop_cost": 0.00},
+        {"coop_cost": 0.2},
+        {"coop_cost": 0.5},
+        {"coop_cost": 1.0},
+        {"coop_cost": 2.0},
+        {"coop_cost": 3.5},
+        {"coop_cost": 5.0},
+        {"coop_cost": 7.5},
+    ],
+    # How the mutation rate (and its built-in 2× coop→def bias) shapes cooperation.
+    # Higher mutation → more drift away from cooperation (asymmetric bias magnifies this).
+    # x-axis: mutation_rate  →  y-axis: cooperator_pct, genome diversity.
+    "mutation_penalty": [
+        {"mutation_rate": 0.05},
+        {"mutation_rate": 0.1},
+        {"mutation_rate": 0.2},
+        {"mutation_rate": 0.3},
+        {"mutation_rate": 0.4},
+        {"mutation_rate": 0.5},
+        {"mutation_rate": 0.6},
+        {"mutation_rate": 0.7},
+    ],
 }
 
 # Defaults used for every trial (overridden by sweep values)
 DEFAULTS = {
-    "grid_size":        250,
-    "initial_cells":    100,
-    "mutation_rate":    0.005,
-    "task_flip_period": None,
+    "grid_size":          250,
+    "initial_cells":      100,
+    "mutation_rate":      0.005,
+    "task_flip_period":   None,
+    "coop_reward_scale":  None,   # None → Environment uses its own default (0.10)
+    "task_alpha":         None,   # None → Environment uses its own default (0.05)
+    "coop_cost":          None,   # None → Environment uses its own default (0.10)
 }
 
 
@@ -90,13 +147,20 @@ def run_trial(
     """
     params = {**DEFAULTS, **config}
 
-    sim = Simulation(
+    sim_kwargs = dict(
         grid_size=params["grid_size"],
         initial_cells=params["initial_cells"],
         mutation_rate=params["mutation_rate"],
         seed=seed,
         task_flip_period=params["task_flip_period"],
     )
+    if params.get("coop_reward_scale") is not None:
+        sim_kwargs["coop_reward_scale"] = params["coop_reward_scale"]
+    if params.get("task_alpha") is not None:
+        sim_kwargs["task_alpha"] = params["task_alpha"]
+    if params.get("coop_cost") is not None:
+        sim_kwargs["coop_cost"] = params["coop_cost"]
+    sim = Simulation(**sim_kwargs)
     if quiet:
         sim._print_stats = lambda _: None
 

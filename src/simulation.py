@@ -12,14 +12,20 @@ class Simulation:
             initial_cells: int = 10,
             mutation_rate: float = 0.005,
             seed: Optional[int] = None,
-            task_flip_period: Optional[int] = None, # <-- New MVG parameter
+            task_flip_period: Optional[int] = None,
+            coop_reward_scale: Optional[float] = None,
+            task_alpha: Optional[float] = None,
+            coop_cost: Optional[float] = None,
         ) -> None:
-            self.env = Environment(
-                width=grid_size, 
-                height=grid_size, 
-                seed=seed,
-                task_flip_period=task_flip_period
-            )
+            env_kwargs = dict(width=grid_size, height=grid_size,
+                              seed=seed, task_flip_period=task_flip_period)
+            if coop_reward_scale is not None:
+                env_kwargs["coop_reward_scale"] = coop_reward_scale
+            if task_alpha is not None:
+                env_kwargs["task_alpha"] = task_alpha
+            if coop_cost is not None:
+                env_kwargs["coop_cost"] = coop_cost
+            self.env = Environment(**env_kwargs)
             self.mutation_rate = mutation_rate
             
             # These two lines were accidentally dropped! 
