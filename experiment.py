@@ -37,36 +37,29 @@ from src.simulation import Simulation
 # Each sweep is a list of dicts; every key maps directly to a Simulation /
 # Environment constructor argument.  Add new sweeps here.
 
+# ── Paper-shaped sweep set: each sweep tests one specific hypothesis ─────────
+# Re-curated for the writeup.  Old `population` and `grid_size` sweeps dropped
+# (initial density equilibrates at carrying capacity — not a meaningful axis).
+# `mutation_rate` and `mutation_penalty` consolidated into one wide-range sweep.
+# `coop_bonus` renamed → `reward_scale`.  New `phase_diagram` 2D sweep added.
+
 SWEEPS = {
-    "population": [
-        {"initial_cells": 20},
-        {"initial_cells": 50},
-        {"initial_cells": 100},
-        {"initial_cells": 200},
-        {"initial_cells": 400},
+    # H1 (central thesis): at what metabolic cost does cooperation collapse?
+    # COOP_COST is paid each tick by cooperators in successful clusters.
+    "coop_cost": [
+        {"coop_cost": 0.00},
+        {"coop_cost": 0.10},
+        {"coop_cost": 0.25},
+        {"coop_cost": 0.50},
+        {"coop_cost": 1.00},
+        {"coop_cost": 2.00},
+        {"coop_cost": 4.00},
+        {"coop_cost": 7.50},
     ],
-    "mutation_rate": [
-        {"mutation_rate": 0.001},
-        {"mutation_rate": 0.005},
-        {"mutation_rate": 0.01},
-        {"mutation_rate": 0.02},
-        {"mutation_rate": 0.05},
-    ],
-    "task_flip": [
-        {"task_flip_period": None},
-        {"task_flip_period": 50},
-        {"task_flip_period": 100},
-        {"task_flip_period": 250},
-        {"task_flip_period": 500},
-    ],
-    "grid_size": [
-        {"grid_size": 150},
-        {"grid_size": 250},
-        {"grid_size": 400},
-    ],
-    # How much the cooperation reward multiplier affects the emergence of cooperation.
-    # x-axis: coop_reward_scale  →  y-axis: cooperator_pct at end of run.
-    "coop_bonus": [
+    # H2: at what reward scale does cooperation become net-positive?
+    # Multiplies every regional reward; clusters need this above some
+    # threshold to outearn their adhesion+coop costs.
+    "reward_scale": [
         {"coop_reward_scale": 0.02},
         {"coop_reward_scale": 0.05},
         {"coop_reward_scale": 0.10},
@@ -76,12 +69,11 @@ SWEEPS = {
         {"coop_reward_scale": 0.60},
         {"coop_reward_scale": 1.00},
     ],
-    # How task specialisation across space shapes population composition.
-    # task_alpha is the Dirichlet concentration for reward distribution:
+    # H3: does spatial specialisation favor cooperation?
+    # Dirichlet concentration on per-tile reward distribution:
     #   low  alpha (~0.01) → each tile rewards only 1–2 tasks (harsh specialisation)
-    #   high alpha (~5.0)  → all tasks equally rewarded everywhere (no spatial pressure)
-    # x-axis: task_alpha  →  y-axis: cooperator_pct, cluster diversity, etc.
-    "task_distribution": [
+    #   high alpha (~5.0)  → all tasks equally rewarded everywhere
+    "task_alpha": [
         {"task_alpha": 0.01},
         {"task_alpha": 0.05},
         {"task_alpha": 0.10},
@@ -91,32 +83,38 @@ SWEEPS = {
         {"task_alpha": 2.00},
         {"task_alpha": 5.00},
     ],
-    # How the metabolic cost of cooperation shapes the fraction of cooperators.
-    # COOP_COST is paid each tick by cooperators in successful clusters.
-    # Low cost  → cooperation almost free; high cost → being a cooperator starves you.
-    # x-axis: coop_cost  →  y-axis: cooperator_pct, defector_pct, selection pressures.
-    "coop_cost": [
-        {"coop_cost": 0.00},
-        {"coop_cost": 0.2},
-        {"coop_cost": 0.5},
-        {"coop_cost": 1.0},
-        {"coop_cost": 2.0},
-        {"coop_cost": 3.5},
-        {"coop_cost": 5.0},
-        {"coop_cost": 7.5},
-    ],
-    # How the mutation rate (and its built-in 2× coop→def bias) shapes cooperation.
-    # Higher mutation → more drift away from cooperation (asymmetric bias magnifies this).
-    # x-axis: mutation_rate  →  y-axis: cooperator_pct, genome diversity.
-    "mutation_penalty": [
+    # H4: where does drift overwhelm selection?
+    # Asymmetric coop-bit mutation (2× to defect, 0.3× back) means drift
+    # always biases toward defection.  Wide range tests both regimes.
+    "mutation_rate": [
+        {"mutation_rate": 0.001},
+        {"mutation_rate": 0.005},
+        {"mutation_rate": 0.02},
         {"mutation_rate": 0.05},
-        {"mutation_rate": 0.1},
-        {"mutation_rate": 0.2},
-        {"mutation_rate": 0.3},
-        {"mutation_rate": 0.4},
-        {"mutation_rate": 0.5},
-        {"mutation_rate": 0.6},
-        {"mutation_rate": 0.7},
+        {"mutation_rate": 0.10},
+        {"mutation_rate": 0.20},
+        {"mutation_rate": 0.40},
+        {"mutation_rate": 0.70},
+    ],
+    # H5 (MVG hypothesis): does environmental fluctuation affect the
+    # cooperate/defect equilibrium?  task_flip_period re-rolls the entire
+    # regional reward landscape every N ticks.
+    "task_flip": [
+        {"task_flip_period": None},
+        {"task_flip_period": 50},
+        {"task_flip_period": 100},
+        {"task_flip_period": 250},
+        {"task_flip_period": 500},
+    ],
+    # Headline figure: 2D phase diagram of cooperation as a function of
+    # (coop_cost, coop_reward_scale).  4×4 grid → 16 configs.  Each cell
+    # of the heatmap is the final cooperator% averaged across seeds.
+    # Together these axes span the (cost, payoff) plane that the public-goods
+    # game lives in.
+    "phase_diagram": [
+        {"coop_cost": cc, "coop_reward_scale": rs}
+        for cc in (0.05, 0.25, 1.0, 4.0)
+        for rs in (0.05, 0.10, 0.25, 0.60)
     ],
 }
 
@@ -232,7 +230,22 @@ def _build_history_df(sim: Simulation) -> pd.DataFrame:
 
 def _print_comparison(all_history: pd.DataFrame, sweep_key: str) -> None:
     """Print a compact comparison table grouped by the sweep variable."""
-    group_col = sweep_key if sweep_key in all_history.columns else "initial_cells"
+    # Map sweep name → the parameter column that varies
+    group_map = {
+        "coop_cost":      "coop_cost",
+        "reward_scale":   "coop_reward_scale",
+        "task_alpha":     "task_alpha",
+        "mutation_rate":  "mutation_rate",
+        "task_flip":      "task_flip_period",
+    }
+    group_col = group_map.get(sweep_key)
+    if group_col is None or group_col not in all_history.columns:
+        # 2D sweeps (phase_diagram) or anything unmapped: fall back to printing
+        # the whole config combo.  Skip the per-axis rollup since there's no
+        # single varying parameter to group by.
+        print(f"\n[skipping comparison table for multi-axis sweep '{sweep_key}' "
+              f"— see CSV for results]\n")
+        return
 
     agg = (
         all_history

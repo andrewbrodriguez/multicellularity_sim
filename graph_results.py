@@ -54,18 +54,23 @@ TYPE_COLORS = {"cooperator": "#4fc3f7", "defector": "#f06292", "lone": "#9a9db0"
 def _sweep_col(history: pd.DataFrame, sweep: str) -> str:
     """Return the column name that varies in this sweep."""
     candidates = {
-        "population":       "initial_cells",
-        "mutation_rate":    "mutation_rate",
-        "mutation_penalty": "mutation_rate",
-        "task_flip":        "task_flip_period",
-        "grid_size":        "grid_size",
-        "coop_cost":        "coop_cost",
+        "coop_cost":      "coop_cost",
+        "reward_scale":   "coop_reward_scale",
+        "task_alpha":     "task_alpha",
+        "mutation_rate":  "mutation_rate",
+        "task_flip":      "task_flip_period",
+        # legacy names kept so older CSVs still plot
+        "coop_bonus":        "coop_reward_scale",
+        "task_distribution": "task_alpha",
+        "mutation_penalty":  "mutation_rate",
+        "population":        "initial_cells",
+        "grid_size":         "grid_size",
     }
     col = candidates.get(sweep, sweep)
     if col in history.columns:
         return col
     config_cols = ["initial_cells", "mutation_rate", "task_flip_period",
-                   "grid_size", "coop_cost"]
+                   "grid_size", "coop_cost", "coop_reward_scale", "task_alpha"]
     for c in config_cols:
         if c in history.columns and history[c].nunique() > 1:
             return c
@@ -750,6 +755,125 @@ def fig_mutation_scatter(history: pd.DataFrame, cells: pd.DataFrame) -> plt.Figu
     return fig
 
 
+# ── figure: 2D phase diagram (headline figure) ───────────────────────────────
+
+def fig_phase_diagram(history: pd.DataFrame) -> plt.Figure:
+    """
+    Headline figure: cooperator% / defector% / avg cluster size / population
+    on the (coop_cost, coop_reward_scale) plane.
+
+    Each panel is a heatmap whose cells are mean-across-seeds of the
+    metric at the final tick.  This is the 2D phase diagram of the
+    public-goods game the simulation models.
+    """
+    if "coop_cost" not in history.columns or "coop_reward_scale" not in history.columns:
+        raise ValueError("phase_diagram requires both coop_cost and coop_reward_scale columns")
+
+    # collapse to one row per (config, seed) — final tick only
+    final = (
+        history
+        .groupby(["coop_cost", "coop_reward_scale", "seed"])
+        .last()
+        .reset_index()
+    )
+    # then mean across seeds per config
+    agg = (
+        final
+        .groupby(["coop_cost", "coop_reward_scale"])
+        .agg(
+            coop_pct=("cooperator_pct", "mean"),
+            def_pct=("defector_pct", "mean"),
+            avg_cluster_size=("avg_cluster_size", "mean"),
+            total_cells=("total_cells", "mean"),
+            multi_advantage=("multi_advantage", "mean"),
+        )
+        .reset_index()
+    )
+
+    panels = [
+        ("coop_pct",         "Cooperators (% of cells)",   "viridis",  "{:.1f}",  None),
+        ("def_pct",          "Defectors (% of cells)",     "magma",    "{:.1f}",  None),
+        ("avg_cluster_size", "Avg cluster size",           "viridis",  "{:.2f}",  None),
+        ("total_cells",      "Population (final tick)",    "viridis",  "{:.0f}",  None),
+        ("multi_advantage",  "Multi-cellular advantage",   "RdBu_r",   "{:+.3f}", "diverging"),
+    ]
+
+    # 2 rows × 3 cols, last cell for legend / sweep summary
+    fig, axes = plt.subplots(2, 3, figsize=(15, 9))
+    axes_flat = axes.flatten()
+
+    for ax, (col, title, cmap, fmt, mode) in zip(axes_flat, panels):
+        pivot = agg.pivot(index="coop_cost", columns="coop_reward_scale", values=col)
+        pivot = pivot.sort_index(ascending=False)  # high cost at top of y-axis
+
+        if mode == "diverging":
+            vmax = float(np.abs(pivot.values).max()) if pivot.size else 1.0
+            vmin = -vmax
+            im = ax.imshow(pivot.values, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
+        else:
+            im = ax.imshow(pivot.values, cmap=cmap, aspect="auto")
+
+        ax.set_xticks(range(len(pivot.columns)))
+        ax.set_xticklabels([f"{x:g}" for x in pivot.columns])
+        ax.set_yticks(range(len(pivot.index)))
+        ax.set_yticklabels([f"{x:g}" for x in pivot.index])
+        ax.set_xlabel("coop_reward_scale  →", fontsize=9)
+        ax.set_ylabel("coop_cost  →", fontsize=9)
+        ax.set_title(title, fontsize=11)
+
+        # annotate every cell
+        vals = pivot.values
+        # pick text color per cell so it's readable on its background
+        norm_vals = (vals - np.nanmin(vals)) / max(np.nanmax(vals) - np.nanmin(vals), 1e-9)
+        for i in range(pivot.shape[0]):
+            for j in range(pivot.shape[1]):
+                v = vals[i, j]
+                if np.isnan(v):
+                    continue
+                # white text on dark cells, black on light cells
+                if mode == "diverging":
+                    text_c = "white" if abs(v) > 0.5 * (np.nanmax(np.abs(vals)) or 1) else "black"
+                else:
+                    text_c = "white" if norm_vals[i, j] < 0.55 else "black"
+                ax.text(j, i, fmt.format(v),
+                        ha="center", va="center",
+                        color=text_c, fontsize=8, fontweight="bold")
+
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    # last panel: text summary instead of a 6th heatmap
+    ax = axes_flat[5]
+    ax.axis("off")
+    n_seeds = history["seed"].nunique()
+    n_configs = agg.shape[0]
+    summary = (
+        f"Phase diagram of the public-goods game\n"
+        f"\n"
+        f"axes:  coop_cost (rows)  ×  coop_reward_scale (cols)\n"
+        f"grid:  {pivot.shape[0]} × {pivot.shape[1]} = {n_configs} configs\n"
+        f"seeds: {n_seeds} per cell\n"
+        f"value: mean of metric at final tick\n"
+        f"\n"
+        f"Reading the figure:\n"
+        f"  · top-left of each heatmap = high cost, low reward\n"
+        f"    → defector-dominated regime, cooperation collapses\n"
+        f"  · bottom-right = low cost, high reward\n"
+        f"    → cooperators thrive, large stable clusters\n"
+        f"  · the boundary between these regimes is the\n"
+        f"    'phase transition' of cooperation."
+    )
+    ax.text(0.0, 0.95, summary, transform=ax.transAxes,
+            fontsize=9.5, va="top", ha="left",
+            family="monospace", color="#d0d3e0")
+
+    fig.suptitle(
+        "Phase diagram of cooperation in (cost, reward) space",
+        fontsize=14, fontweight="bold",
+    )
+    fig.tight_layout()
+    return fig
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -777,25 +901,31 @@ def main() -> None:
     print(f"Loading {cell_path} …")
     cells   = pd.read_csv(cell_path)
 
-    sweep_col = _sweep_col(history, args.sweep)
-    print(f"Sweep column: '{sweep_col}'  |  "
-          f"{history[sweep_col].nunique()} values  |  "
-          f"{history['seed'].nunique()} seeds\n")
+    # 2D phase diagram is its own thing — skip the 1D figure pipeline.
+    if args.sweep == "phase_diagram":
+        print(f"Phase diagram: {history['seed'].nunique()} seeds × "
+              f"{history.groupby(['coop_cost','coop_reward_scale']).ngroups} configs\n")
+        figures = [("heatmap", fig_phase_diagram(history))]
+    else:
+        sweep_col = _sweep_col(history, args.sweep)
+        print(f"Sweep column: '{sweep_col}'  |  "
+              f"{history[sweep_col].nunique()} values  |  "
+              f"{history['seed'].nunique()} seeds\n")
 
-    figures = [
-        ("timeseries",         fig_timeseries(history, sweep_col, args.sweep)),
-        ("final_bars",         fig_final_bars(history, sweep_col, args.sweep)),
-        ("genome_composition", fig_genome(cells, sweep_col, args.sweep)),
-        ("selection_heatmap",  fig_selection_heatmap(history, sweep_col, args.sweep)),
-    ]
-    if args.sweep == "coop_bonus":
-        figures.append(("coop_bonus_scatter", fig_coop_bonus_scatter(history, cells)))
-    if args.sweep == "task_distribution":
-        figures.append(("task_distribution", fig_task_distribution(history, cells)))
-    if args.sweep == "coop_cost":
-        figures.append(("coop_cost_scatter", fig_coop_cost_scatter(history, cells)))
-    if args.sweep in ("mutation_penalty", "mutation_rate"):
-        figures.append(("mutation_scatter", fig_mutation_scatter(history, cells)))
+        figures = [
+            ("timeseries",         fig_timeseries(history, sweep_col, args.sweep)),
+            ("final_bars",         fig_final_bars(history, sweep_col, args.sweep)),
+            ("genome_composition", fig_genome(cells, sweep_col, args.sweep)),
+            ("selection_heatmap",  fig_selection_heatmap(history, sweep_col, args.sweep)),
+        ]
+        if args.sweep in ("reward_scale", "coop_bonus"):
+            figures.append(("reward_scale_scatter", fig_coop_bonus_scatter(history, cells)))
+        if args.sweep in ("task_alpha", "task_distribution"):
+            figures.append(("task_alpha_scatter", fig_task_distribution(history, cells)))
+        if args.sweep == "coop_cost":
+            figures.append(("coop_cost_scatter", fig_coop_cost_scatter(history, cells)))
+        if args.sweep in ("mutation_rate", "mutation_penalty"):
+            figures.append(("mutation_scatter", fig_mutation_scatter(history, cells)))
 
     if args.save_dir:
         save_dir = Path(args.save_dir)
