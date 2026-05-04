@@ -511,6 +511,9 @@ class Environment:
 
     def tick(self) -> None:
         self.tick_count += 1
+        if (self.task_flip_period is not None
+                and self.tick_count % self.task_flip_period == 0):
+            self._generate_regional_rewards()
         self._apply_forces()
 
         for cell in self._lone_cells():
