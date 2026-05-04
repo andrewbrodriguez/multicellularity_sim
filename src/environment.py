@@ -89,6 +89,13 @@ MAX_CELLS           = 10_000
 ADHESION_BOND_PROB   = 0.20
 ADHESION_FORM_RADIUS = 10.0  # µm — slightly beyond touching; cells in range can bond
 
+# Bond breakage under strain: real cell-cell adhesions yield when stretched.
+# A cluster member whose distance to the cluster centroid exceeds
+# BOND_BREAK_DIST detaches stochastically each tick — probability scales with
+# how far past the threshold it has drifted.
+BOND_BREAK_DIST     = 60.0   # µm — beyond the attractive Gaussian's tail
+BOND_BREAK_PROB_MAX = 0.05   # per-tick detach probability cap
+
 REGION_SIZE          = 100    # µm — side length of each spatial reward tile (5×5 tiles in 250µm²)
 
 # Ordered list of all 12 task tuples — index into the regional reward vector
@@ -314,6 +321,36 @@ class Environment:
         for k, cell in enumerate(cell_list):
             cell.position = (float(pos[k, 0]), float(pos[k, 1]))
 
+    # ── bond breakage under strain ────────────────────────────────────────────
+
+    def _break_stretched_bonds(self) -> None:
+        """
+        Cells too far from their cluster's centroid detach stochastically.
+        Models physical strain on cell-cell adhesions: a member dragged
+        beyond BOND_BREAK_DIST has a non-zero per-tick chance of being torn
+        loose and reverting to lone status.
+
+        Empty clusters (size 0 after detachments) are removed.
+        """
+        for cluster in list(self.clusters.values()):
+            positioned = [c for c in cluster.cells if c.position is not None]
+            if len(positioned) < 2:
+                continue
+            cx = float(np.mean([c.position[0] for c in positioned]))
+            cy = float(np.mean([c.position[1] for c in positioned]))
+            for cell in list(cluster.cells):
+                if cell.position is None:
+                    continue
+                d = float(np.hypot(cell.position[0] - cx, cell.position[1] - cy))
+                if d <= BOND_BREAK_DIST:
+                    continue
+                excess = (d - BOND_BREAK_DIST) / BOND_BREAK_DIST
+                p = min(BOND_BREAK_PROB_MAX, BOND_BREAK_PROB_MAX * excess)
+                if random.random() < p:
+                    cluster.remove_cell(cell)
+            if cluster.size == 0:
+                self.clusters.pop(cluster.cluster_id, None)
+
     # ── adhesion formation ────────────────────────────────────────────────────
 
     @staticmethod
@@ -456,6 +493,11 @@ class Environment:
             return
         if cell.fitness < LONE_REPL_THRESH:
             return
+        # Cell-cycle gate: must have grown to division size.  Skipping this
+        # would let high-fitness cells fission instantly, which is biologically
+        # implausible — real cells double in mass before splitting.
+        if not cell.is_division_ready:
+            return
         # Defectors replicate freely; cooperators need ≥1 reward point for their op in this region.
         if not cell.is_defector:
             rvec = self._get_regional_rewards(cell.position)
@@ -470,6 +512,9 @@ class Environment:
                 return
         cell.fitness -= LONE_REPL_THRESH
         child = cell.mutate()
+        # Both halves of the division reset to newborn size — biomass has been split.
+        cell.size  = 1.0
+        child.size = 1.0
         self.place_cell(child, self._pos_near(cell.position, r=3.0))
         cell.replication_cooldown  = LONE_REPL_COOLDOWN
         child.replication_cooldown = LONE_REPL_COOLDOWN
@@ -479,6 +524,12 @@ class Environment:
             return
         per_cell = cluster.fitness / max(cluster.size, 1)
         if per_cell < CLUSTER_REPL_THRESH:
+            return
+        # Cell-cycle gate at the cluster level: the average member must be
+        # division-ready.  Otherwise a single fast-growing cooperator could
+        # trigger replication of the whole cluster while siblings are still juvenile.
+        avg_size = float(np.mean([c.size for c in cluster.cells])) if cluster.cells else 0.0
+        if avg_size < 2.0:
             return
         # Stochastic gate: prevents synchronized division pulses across clusters
         if random.random() > CLUSTER_REPL_PROB:
@@ -504,6 +555,12 @@ class Environment:
             placed.append(child_cell)
         if placed:
             self.clusters[offspring.cluster_id] = offspring
+        # Reset parent and offspring biomass — both halves of the division
+        # start over at newborn size.
+        for c in cluster.cells:
+            c.size = 1.0
+        for c in offspring.cells:
+            c.size = 1.0
         cluster.replication_cooldown   = CLUSTER_REPL_COOLDOWN
         offspring.replication_cooldown = CLUSTER_REPL_COOLDOWN
 
@@ -515,6 +572,11 @@ class Environment:
                 and self.tick_count % self.task_flip_period == 0):
             self._generate_regional_rewards()
         self._apply_forces()
+
+        # Cells dragged too far from their cluster's centroid detach.
+        # Run before fitness eval so a cell that just left doesn't earn
+        # this tick's cluster reward.
+        self._break_stretched_bonds()
 
         for cell in self._lone_cells():
             cell.fitness += self._eval_lone_cell(cell)

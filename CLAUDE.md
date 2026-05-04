@@ -1,33 +1,26 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in this repository. See `SIM_DESIGN.md` for the full simulation spec.
 
 ## Project Overview
 
 CS2212 final project by Andrew Rodriguez. A physics-based evolutionary simulation of the emergence of multicellularity, modelling the **defector problem**: cells that join cooperative clusters but withhold computation and reap shared rewards. The core question is what conditions allow cooperation to persist against parasitic free-riders.
 
-## Running the Simulation
+## Running
 
 ```bash
-# Activate the virtual environment first
 source sim_venv/bin/activate
+pip install -r requirements.txt    # if first time
 
-# Headless run with console stats (no visualization)
-python main.py
-
-# Full Napari GUI visualization (default: 40 cells, 500 ticks, sample every 10)
-python visualize.py
-
-# Common visualize.py flags
-python visualize.py --initial-cells 100 --ticks 600 --sample-every 5 --seed 42
-python visualize.py --task-flip-period 100   # Enable MVG (Modularly Varying Goals) extension
-python visualize.py --sample-every 1 --quiet  # Every tick, no console noise
+python main.py                                        # headless smoke run
+python visualize.py                                    # full Napari GUI
+python visualize.py --task-flip-period 100             # MVG mode
+python experiment.py --sweep coop_cost --quiet         # one sweep → CSVs in results/
+python experiment.py --sweep all --ticks 500 --quiet   # all sweeps
+python graph_results.py --sweep coop_cost --save-dir figures/
 ```
 
-There are no tests and no linter configuration. Install dependencies with:
-```bash
-pip install -r requirements.txt
-```
+No tests, no linter.
 
 ## Architecture
 
@@ -35,59 +28,89 @@ The simulation is a **multilevel selection model** — individual selection with
 
 ### Data flow each tick (`Environment.tick`)
 
-1. `_refresh_env()` — draw random 8-bit integers A, B, C; optionally flip MVG task
-2. `_apply_forces()` — vectorized numpy physics (Brownian jitter → repulsion → adhesion springs → wall reflection) using `scipy.cKDTree` for neighbour queries
-3. Fitness evaluation — lone cells earn `BASE_REWARD`; clusters attempt the current logic task; success grants `COMPLEX_REWARD − DEFECTOR_DRAIN × n_defectors` split across all members
+1. (MVG) if `task_flip_period` is set and we hit the period, re-roll the regional reward landscape via `_generate_regional_rewards()`
+2. `_apply_forces()` — Taichi physics (Brownian + repulsion + adhesion + inter-cluster attraction + wall reflection); numpy/cKDTree fallback in `_apply_forces_numpy_fallback`
+3. Fitness evaluation
+   - Lone cooperators: collect their op's 1-step regional reward minus `coop_cost`
+   - Lone defectors / non-cooperators: only the survival stipend `BASE_REWARD = 0.2`
+   - Clusters: sum across **all 12 tasks in `ALL_TASKS`** of `(rvec[t] × coop_reward_scale − DEFECTOR_DRAIN × n_defectors)` whenever `cluster.can_complete_task(...)` is True; split per cell, cooperators additionally pay `coop_cost`
 4. `cell.tick()` / `cluster.tick()` — age increment, cooldown decrement
-5. `_try_adhesion()` — KDTree search to bond adhesive lone cells into clusters or join existing ones
-6. Death — old age (`≥150` ticks), starvation (`fitness/age < 0.04` after grace period), or age-based competition at `MAX_CELLS = 900`
-7. Replication — lone cells at `fitness ≥ 18.0`; clusters at `per_cell ≥ 10.0` (whole cluster replicates as a unit, propagating defectors into offspring)
+5. `_break_stretched_bonds()` — cluster members > `BOND_BREAK_DIST = 60` µm from centroid detach stochastically (probability scales with excess distance, capped at 0.05/tick). Then `_try_adhesion()` — kin-Hamming-gated bond formation (lone↔lone or lone→cluster)
+6. **Probabilistic** death — old age (ramp from `MAX_CELL_AGE = 500` to 1.5×), starvation (`fitness/age < 0.02` after grace, p ≤ 15%/tick), or oldest-near-spawn culling at `MAX_CELLS = 10_000`
+7. Replication — lone cells at `fitness ≥ 28.0` AND `size ≥ 2.0` (cooperators additionally need ≥1 reward point in their op's regional vector); clusters at per-cell `≥ 18.0` AND mean member `size ≥ 2.0`. Both gated by stochastic probabilities (`LONE_REPL_PROB = 0.10`, `CLUSTER_REPL_PROB = 0.05`). After division, all involved cells reset to `size = 1.0`
 
-### Genome encoding (`src/cell.py`)
+### Genome (`src/cell.py`)
 
-8-bit bitstring; only bits 0–3 are active (bits 4–7 reserved):
+8-bit bitstring; only bits 0–3 active. **Cooperators force adhesion** (`has_adhesion = genome[2] OR genome[3]`). Mutation is **asymmetric on the cooperator bit**: `coop→def` at `2.0 × rate`, `def→coop` at `0.3 × rate`. All other bits flip symmetrically.
 
-| Bits | Field | Effect |
-|------|-------|--------|
-| 0–1 | Operation | `00`=AND `01`=OR `10`=XOR `11`=NAND |
-| 2 | Adhesion | Can form/join clusters; pays `ADHESION_COST = 0.3/tick` |
-| 3 | Cooperator | `0` + adhesion = **defector** (free-rider phenotype) |
+### Cell cycle (`src/cell.py`)
 
-### Task computation (`src/cluster.py`)
+Cells carry a `size` attribute (`NEWBORN_SIZE = 1.0` → `DIVISION_SIZE = 2.0`) that grows by `GROWTH_RATE = 0.015`/tick **only when `fitness > 0`**. Replication requires the cell-cycle gate (`is_division_ready`) in addition to fitness. After division both halves reset to size 1.0. The cluster path requires the *mean* member size to be division-ready.
 
-`Cluster.compute_task(a, b, c, op1, op2)` executes 1-step (primitive) or 2-step (complex) tasks. A 2-step task requires one cooperator with `op1` AND one with `op2` — this forced division of labour is what selects for multicellularity. Defectors (`has_adhesion=True, is_cooperator=False`) receive the per-cell reward share but contribute nothing.
+### Reward landscape (`src/environment.py`)
 
-### MVG Extension (`src/environment.py`)
+The world is tiled in `REGION_SIZE = 100` µm squares. Each tile has a 12-element reward vector — one per task in `ALL_TASKS` (4 one-step + 4 two-step + 4 three-step). Mass is allocated per tier (`SINGLE/DOUBLE/TRIPLE_MASS = 3/8/12`) and split across the four slots in each tier by `Dirichlet(task_alpha)`. Low alpha = harsh specialisation; high alpha = uniform.
 
-Partially implemented. When `task_flip_period` is set, `_refresh_env()` cycles through four task structures every N ticks:
-```python
-self.task_states = [("AND", "XOR"), ("OR",), ("NAND", "OR"), ("XOR",)]
-```
-The hypothesis: dynamic environments force modular networks that can identify and exclude defectors.
+### Population seeding (`src/simulation.py`)
 
-### Visualization (`src/visualizer.py` + `visualize.py`)
+By default, **40% of initial cells are seeded as pre-formed 2–4 cell cooperator clusters with distinct operations**. This skips the slow startup phase where random adhesion would have to assemble a working cluster from scratch.
 
-`build_napari_data()` builds an `(T, 400, 400, 3)` uint8 image stack (Gaussian density heatmap) plus point clouds per cell type. Colors: gray = lone, blue = cooperator, red = defector. The Napari title bar updates live with tick stats and current task string as you scrub the time slider.
+### Sweep + plot pipeline
 
-`Simulation.history` is a list of dicts with keys: `tick`, `total_cells`, `lone_cells`, `clustered_cells`, `num_clusters`, `avg_cluster_size`, `cooperators`, `defectors`, `cooperator_pct`, `defector_pct`, `mean_fitness`, `current_task`, `cell_records`.
+`experiment.py` defines `SWEEPS` dict of `{name: [{param: value}, ...]}`. Each trial runs `Simulation.run`, builds two DataFrames (`cell_df`, `history_df`), tags them with config metadata, and concats across configs+seeds. Saves to `results/{sweep}_cell_df.csv` and `results/{sweep}_history_df.csv`. `graph_results.py` reads those and emits a 4–5 figure set per sweep into `figures/`.
 
-## Key Constants (all in `src/environment.py`)
+`Simulation.history` rows have keys: `tick`, `total_cells`, `lone_cells`, `clustered_cells`, `num_clusters`, `avg_cluster_size`, `cooperators`, `defectors`, `cooperator_pct`, `defector_pct`, `coop_genome_pct`, `mean_fitness`, `multi_advantage` (cluster_rate − lone_rate), `coop_advantage` (clustered-coop rate − clustered-def rate), `current_task`, `cell_records`, `cluster_groups`.
+
+## Key Constants (`src/environment.py`)
 
 ```python
-COMPLEX_REWARD      = 5.0    # NOTE: SIM_DESIGN.md says 20.0 — current value is conservative
-DEFECTOR_DRAIN      = 1.5    # per-defector reduction in gross cluster reward
-COOP_COST           = 0.3    # extra metabolic cost paid only by cooperators in successful clusters
-BASE_REWARD         = 1.0    # lone cell baseline per tick
+COOP_REWARD_SCALE   = 0.10    # global multiplier on regional reward vectors
+BASE_REWARD         = 0.2     # lone-cell survival stipend (NOT scaled)
+DEFECTOR_DRAIN      = 1.5     # per-defector drain on each completed task
+COOP_COST           = 0.1     # extra metabolic cost for cooperators in successful clusters
+ADHESION_COST       = 0.1     # paid every tick by adhesion-expressing cells (cell.py)
+
+LONE_REPL_THRESH    = 28.0
+CLUSTER_REPL_THRESH = 18.0
+LONE_REPL_COOLDOWN  = 50
+CLUSTER_REPL_COOLDOWN = 50
+LONE_REPL_PROB      = 0.10
+CLUSTER_REPL_PROB   = 0.05
+
+MAX_CELL_AGE        = 500
+GRACE_PERIOD        = 20
+SURVIVAL_RATE       = 0.02
 MAX_CLUSTER_SIZE    = 12
-MAX_CELLS           = 900
-ADHESION_BOND_PROB  = 0.20
+MAX_CELLS           = 10_000
+
+ADHESION_BOND_PROB   = 0.20
+ADHESION_FORM_RADIUS = 10.0   # µm
+REGION_SIZE          = 100    # µm
+
+BOND_BREAK_DIST      = 60.0   # µm — cluster centroid distance beyond which bonds yield
+BOND_BREAK_PROB_MAX  = 0.05   # per-tick detach probability cap
 ```
 
-**Important:** `COMPLEX_REWARD` is currently `5.0` in code but the design document specifies `20.0`. With `5.0`, clusters have very little fitness headroom before defector drain collapses them. Increasing to `20.0` dramatically increases cluster viability and makes multicellular emergence more observable.
+`src/cell.py`:
+```python
+NEWBORN_SIZE   = 1.0
+DIVISION_SIZE  = 2.0
+GROWTH_RATE    = 0.015   # ~67 ticks newborn → division-ready
+```
 
 ## Design Decisions Worth Knowing
 
-- **Age-based competition at carrying capacity** (not fitness-based): intentional. Fitness-based killing would bias against defectors — suppressing the very individual selection pressure the model is designed to study.
-- **Defectors pay only 25% adhesion cost when lone**: keeps adhesive defectors alive while they search for clusters to infiltrate.
-- **Cluster replication copies defectors**: models how cancer-like cells propagate within multicellular lineages.
+- **Cooperators force adhesion**: a cooperator that doesn't bond can't share rewards, so the bit gets OR'd onto the adhesion bit at parse time.
+- **Asymmetric coop-bit mutation**: cheating must be biologically easier to evolve than cooperation; the genetic filter has to overcome the bias.
+- **Kin-gated adhesion**: bond probability scales with genomic similarity on bits 0–3, making defector infiltration of established cooperator clusters harder than ad-hoc lone-on-lone bonding.
+- **Seeded cooperator clusters at startup**: avoids waiting tens of thousands of ticks for random adhesion to find a working complementary pair. Bias the initial conditions, then let evolution operate.
+- **Probabilistic age/starvation death** (not deterministic): smooths population dynamics; avoids synchronized cohort die-offs.
+- **Stochastic replication gates**: even when fitness threshold is crossed, replication only fires with probability `LONE_REPL_PROB` / `CLUSTER_REPL_PROB`. Prevents simultaneous division pulses across the whole population.
+- **Cluster replication copies defectors**: models cancer-like propagation within multicellular lineages.
+- **Cooperator-only lone replication gate**: lone cooperators must be in a tile that pays for their op before they can reproduce; defectors face no such gate (they free-ride wherever they land).
+- **Age-based competition at carrying capacity** (not fitness-based): fitness-based killing biases against defectors whose accumulated fitness is diluted by cluster infiltration — that would suppress the very individual selection the model studies.
 - **No wrapping** — elastic wall reflection keeps spatial structure intact for cluster cohesion.
+
+## Status of sweeps (`results/`, `figures/`)
+
+All eight sweeps in `SWEEPS` have CSV outputs in `results/`. Figures exist in `figures/` for: `population`, `mutation_penalty`, `task_flip` (re-run after MVG was wired in), `coop_bonus`, `task_distribution`, `coop_cost`. **`grid_size` and `mutation_rate` have CSVs but no plotted figures yet** — run `graph_results.py --sweep grid_size --save-dir figures/` to produce them.

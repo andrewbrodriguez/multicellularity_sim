@@ -19,6 +19,14 @@ _OP_MAP = {
 
 ADHESION_COST = 0.1   # metabolic penalty per tick for expressing adhesion
 
+# Cell-cycle: cells must double in size before they can divide.
+# Daughter cells start at NEWBORN_SIZE; grow at GROWTH_RATE per tick toward
+# DIVISION_SIZE.  Replication is gated on (size ≥ DIVISION_SIZE) AND the
+# existing fitness threshold; whichever is slower paces division.
+NEWBORN_SIZE   = 1.0
+DIVISION_SIZE  = 2.0
+GROWTH_RATE    = 0.015   # ~67 ticks from newborn to division-ready
+
 
 def _apply_op(op: str, a: int, b: int) -> int:
     a, b = a & 0xFF, b & 0xFF
@@ -51,6 +59,7 @@ class Cell:
 
         self.age:                  int   = 0
         self.fitness:              float = 0.0
+        self.size:                 float = NEWBORN_SIZE
         self.cluster_id:           Optional[int]             = None
         self.position:             Optional[Tuple[float, float]] = None
         self.velocity:             Tuple[float, float]           = (0.0, 0.0)
@@ -78,6 +87,14 @@ class Cell:
 
     def tick(self) -> None:
         self.age += 1
+        # Cells grow toward division size only when they're net-positive in
+        # energy this lifetime — a starving cell can't accumulate biomass.
+        if self.fitness > 0 and self.size < DIVISION_SIZE:
+            self.size = min(DIVISION_SIZE, self.size + GROWTH_RATE)
+
+    @property
+    def is_division_ready(self) -> bool:
+        return self.size >= DIVISION_SIZE
 
     def mutate(self) -> "Cell":
         # Asymmetric mutation on the cooperator bit: cheating is biologically
