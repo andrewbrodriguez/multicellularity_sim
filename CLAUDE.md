@@ -30,10 +30,11 @@ The simulation is a **multilevel selection model** — individual selection with
 
 1. (MVG) if `task_flip_period` is set and we hit the period, re-roll the regional reward landscape via `_generate_regional_rewards()`
 2. `_apply_forces()` — Taichi physics (Brownian + repulsion + adhesion + inter-cluster attraction + wall reflection); numpy/cKDTree fallback in `_apply_forces_numpy_fallback`
-3. Fitness evaluation
-   - Lone cooperators: collect their op's 1-step regional reward minus `coop_cost`
-   - Lone defectors / non-cooperators: only the survival stipend `BASE_REWARD = 0.2`
-   - Clusters: sum across **all 12 tasks in `ALL_TASKS`** of `(rvec[t] × coop_reward_scale − DEFECTOR_DRAIN × n_defectors)` whenever `cluster.can_complete_task(...)` is True; split per cell, cooperators additionally pay `coop_cost`
+3. Fitness evaluation — **no basal reward**; every cell pays `MAINTENANCE_COST = 0.02` + `adhesion_cost` every tick, and health (fitness) only goes up via task completion. Atrophy → starvation kills cells with no income source.
+   - Lone cooperator with op X in a tile rewarding 1-step task X: earns `rvec[X] × coop_reward_scale`, pays `coop_cost`.
+   - Lone defectors and lone cooperators in tiles that don't reward their op: earn nothing, atrophy at `MAINTENANCE_COST + adhesion_cost`/tick.
+   - Clusters: sum across **all 12 tasks in `ALL_TASKS`** of `max(0, rvec[t] × scale − DEFECTOR_DRAIN × n_defectors)` whenever `cluster.can_complete_task(t)` is True; the sum splits across the **entire** cluster (both cooperators and defectors share). Cooperators additionally pay `coop_cost` only when `total_gross > 0`. Every cell pays `MAINTENANCE_COST + adhesion_cost` regardless. Health can go negative.
+   - The cluster loop covers both "cluster does a multi-step task" and "cluster has only one cooperator who can do a 1-step task in this tile" — both paths feed `total_gross` and both split across the entire cluster.
 4. `cell.tick()` / `cluster.tick()` — age increment, cooldown decrement
 5. `_break_stretched_bonds()` — cluster members > `BOND_BREAK_DIST = 60` µm from centroid detach stochastically (probability scales with excess distance, capped at 0.05/tick). Then `_try_adhesion()` — kin-Hamming-gated bond formation (lone↔lone or lone→cluster)
 6. **Probabilistic** death — old age (ramp from `MAX_CELL_AGE = 500` to 1.5×), starvation (`fitness/age < 0.02` after grace, p ≤ 15%/tick), or oldest-near-spawn culling at `MAX_CELLS = 10_000`
@@ -65,10 +66,12 @@ By default, **40% of initial cells are seeded as pre-formed 2–4 cell cooperato
 
 ```python
 COOP_REWARD_SCALE   = 0.10    # global multiplier on regional reward vectors
-BASE_REWARD         = 0.2     # lone-cell survival stipend (NOT scaled)
+MAINTENANCE_COST    = 0.02    # per-tick metabolic drain on EVERY cell — no basal income
 DEFECTOR_DRAIN      = 1.5     # per-defector drain on each completed task
 COOP_COST           = 0.1     # extra metabolic cost for cooperators in successful clusters
 ADHESION_COST       = 0.1     # paid every tick by adhesion-expressing cells (cell.py)
+# BASE_REWARD / SIMPLE_REWARD / COMPLEX_REWARD / TRIPLE_REWARD: kept as 0.0 for
+# backward compat with visualize.py imports; no longer used in fitness eval.
 
 LONE_REPL_THRESH    = 28.0
 CLUSTER_REPL_THRESH = 18.0
@@ -100,6 +103,7 @@ GROWTH_RATE    = 0.015   # ~67 ticks newborn → division-ready
 
 ## Design Decisions Worth Knowing
 
+- **No basal reward / atrophy**: every cell pays `MAINTENANCE_COST + adhesion_cost` every tick. Health goes up only via task completion. Cells without any income source drift below zero fitness and die via the existing starvation path. This is what makes the spatial reward landscape and complementary-cooperation incentives selective rather than decorative.
 - **Cooperators force adhesion**: a cooperator that doesn't bond can't share rewards, so the bit gets OR'd onto the adhesion bit at parse time.
 - **Asymmetric coop-bit mutation**: cheating must be biologically easier to evolve than cooperation; the genetic filter has to overcome the bias.
 - **Kin-gated adhesion**: bond probability scales with genomic similarity on bits 0–3, making defector infiltration of established cooperator clusters harder than ad-hoc lone-on-lone bonding.

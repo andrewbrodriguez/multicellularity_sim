@@ -7,14 +7,33 @@ Each tick applies:
   3. Adhesion springs  — same-cluster cells pulled back to ADHESION_REST_DIST
   4. Hard walls        — elastic reflection at all four boundaries (no wrapping)
 
-Defector economics
-------------------
-  cooperators   pay COOP_COST on top of adhesion_cost when cluster succeeds
-  defectors     do NOT pay COOP_COST  → per-tick fitness advantage within cluster
-  each defector drains DEFECTOR_DRAIN from the cluster's gross reward
-  → a cluster with many defectors produces less total reward AND cooperators
-    are hit by both the diluted share AND COOP_COST; their per-tick fitness
-    drops below BASE_REWARD, making the cluster worse than being alone
+Health economics
+----------------
+  Every cell pays MAINTENANCE_COST + adhesion_cost every tick — there is NO
+  basal income.  Health (fitness) only goes up when a cell or its cluster
+  completes a rewarded task.  A cell that cannot complete any task atrophies
+  and eventually dies via the existing starvation path.
+
+  Lone cells:
+    - any cooperator with op X in a tile rewarding task X earns
+      rvec[X] * coop_reward_scale and pays coop_cost.
+    - defectors and cooperators with no matching task earn nothing
+      and drain at MAINTENANCE_COST + adhesion_cost per tick.
+
+  Clusters:
+    - for every task t in ALL_TASKS where rvec[t] > 0 and the cluster has
+      the cooperators to compute it (1-step needs one matching cooperator;
+      2- and 3-step need complementary cooperators), the cluster earns
+      max(0, rvec[t] * scale  −  DEFECTOR_DRAIN * n_defectors).
+    - the sum is split evenly across the ENTIRE cluster, including
+      defectors.  This handles both:
+        (a) cluster has cooperators for a complex task → splits the complex
+            reward across everyone.
+        (b) cluster lacks cooperators for any complex task but one
+            cooperator can do a 1-step task that's rewarded here → that
+            1-step reward enters total_gross and is split across everyone.
+    - cooperators pay coop_cost per tick only when the cluster earned.
+    - every cell pays MAINTENANCE_COST + adhesion_cost regardless.
 
 Replication cooldown
 --------------------
@@ -53,10 +72,18 @@ SURVIVAL_RATE       = 0.02   # minimum fitness/age ratio to avoid starvation
 
 COOP_REWARD_SCALE = 0.1  # global multiplier on all regional vector values; tune to adjust cooperation incentive
 
-BASE_REWARD     = 0.2    # survival stipend — NOT scaled, stays as absolute floor
-SIMPLE_REWARD   = 2.0    # kept for reference; actual rewards now come from scaled vector entries
-COMPLEX_REWARD  = 7.0
-TRIPLE_REWARD   = 15.0
+# Per-tick metabolic drain on every cell.  There is NO basal reward — cells
+# that cannot complete any rewarded task atrophy at this rate (plus their
+# adhesion cost) and eventually die via the starvation path.
+MAINTENANCE_COST = 0.02
+
+# Legacy constants kept only for backward compatibility with visualize.py's
+# stats panel.  No longer used in the fitness eval; basal reward was removed
+# in favour of MAINTENANCE_COST atrophy.
+BASE_REWARD     = 0.0
+SIMPLE_REWARD   = 0.0
+COMPLEX_REWARD  = 0.0
+TRIPLE_REWARD   = 0.0
 
 # Reward mass distributed per tile, partitioned by task complexity.
 # Multi-step tasks carry more mass so cooperation through complementary
@@ -425,21 +452,50 @@ class Environment:
         return [c for c in self.cells.values() if c.cluster_id is None]
 
     def _eval_lone_cell(self, cell: Cell) -> float:
-        # Lone cooperators *can* be productive on their own — they collect the
-        # 1-step task reward for their operation in the current tile, minus
-        # COOP_COST. Multi-step tasks carry more mass, so a lone cooperator
-        # always earns less than the same op pulling its weight inside a
-        # complementary cluster. Defectors get only the survival stipend.
-        base = max(0.0, BASE_REWARD - cell.adhesion_cost * 0.25)
-        if not cell.is_cooperator or cell.position is None:
-            return base
-        rvec = self._get_regional_rewards(cell.position)
-        task_mass = float(rvec[_OP_TO_IDX[cell.operation]])
-        if task_mass <= 0:
-            return base
-        return base + max(0.0, task_mass * self.coop_reward_scale - self.coop_cost)
+        """
+        Per-tick health change for a lone cell.
+
+        A lone cooperator with op X in a tile that rewards the 1-step task X
+        earns rvec[X] * coop_reward_scale and pays coop_cost.  Defectors and
+        cooperators in tiles that don't reward their op earn nothing.
+
+        Every cell pays MAINTENANCE_COST + adhesion_cost every tick.  The
+        return value can be NEGATIVE — cells without an income source
+        atrophy and eventually starve.
+        """
+        income    = 0.0
+        coop_paid = 0.0
+        if cell.is_cooperator and cell.position is not None:
+            rvec      = self._get_regional_rewards(cell.position)
+            task_mass = float(rvec[_OP_TO_IDX[cell.operation]])
+            if task_mass > 0:
+                income    = task_mass * self.coop_reward_scale
+                coop_paid = self.coop_cost
+        cost = MAINTENANCE_COST + cell.adhesion_cost + coop_paid
+        return income - cost
 
     def _eval_cluster(self, cluster: Cluster) -> None:
+        """
+        Per-tick health update for every member of a cluster.
+
+        For every task t in ALL_TASKS where the tile rewards t AND the
+        cluster has the cooperators required to compute it, the cluster
+        earns max(0, rvec[t] * scale - DEFECTOR_DRAIN * n_defectors).  This
+        sum is split evenly across the ENTIRE cluster (cooperators AND
+        defectors).  Two important cases are handled by the same loop:
+
+          (a) The cluster has the cooperators for a multi-step task in this
+              tile → that complex reward enters total_gross and splits.
+
+          (b) The cluster lacks the multi-step cooperators but one
+              cooperator can do a rewarded 1-step task → that 1-step reward
+              enters total_gross and splits across the entire cluster.
+
+        Every cell pays MAINTENANCE_COST + adhesion_cost every tick.
+        Cooperators additionally pay coop_cost when the cluster earned.
+        Health can go negative — cells in a cluster that can complete
+        nothing in its current tile atrophy and eventually starve.
+        """
         positioned = [c for c in cluster.cells if c.position is not None]
         if not positioned:
             return
@@ -455,17 +511,17 @@ class Environment:
             op2 = task[1] if len(task) > 1 else None
             op3 = task[2] if len(task) > 2 else None
             if cluster.can_complete_task(op1, op2, op3):
-                total_gross += max(0.0, float(rvec[i]) * self.coop_reward_scale - DEFECTOR_DRAIN * cluster.defector_count)
+                total_gross += max(
+                    0.0,
+                    float(rvec[i]) * self.coop_reward_scale
+                    - DEFECTOR_DRAIN * cluster.defector_count,
+                )
 
-        if total_gross > 0:
-            per_cell = total_gross / cluster.size
-            for cell in cluster.cells:
-                coop_cost = self.coop_cost if cell.is_cooperator else 0.0
-                cell.fitness += max(0.0, per_cell - cell.adhesion_cost - coop_cost)
-            cluster.fitness += total_gross
-        else:
-            for cell in cluster.cells:
-                cell.fitness += max(0.0, BASE_REWARD - cell.adhesion_cost * 0.25)
+        per_cell = total_gross / max(cluster.size, 1)
+        for cell in cluster.cells:
+            coop_paid = self.coop_cost if (cell.is_cooperator and total_gross > 0) else 0.0
+            cell.fitness += per_cell - cell.adhesion_cost - coop_paid - MAINTENANCE_COST
+        cluster.fitness += total_gross
 
     # ── replication ───────────────────────────────────────────────────────────
 

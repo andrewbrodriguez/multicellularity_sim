@@ -101,26 +101,41 @@ Per-tick displacement is hard-capped at `MAX_DISPLACEMENT = 4.0` µm to prevent 
 
 ## Cooperation and the Task
 
+There is **no basal income**. Every cell pays `MAINTENANCE_COST = 0.02 + adhesion_cost` per tick — health (fitness) only goes up by completing a rewarded task. Cells that cannot find any task to complete atrophy and eventually starve via the existing starvation path.
+
 ### Lone cells
-A lone cell earns a survival stipend `BASE_REWARD = 0.2 − 0.25 × adhesion_cost`. A lone **cooperator** additionally collects the regional 1-step reward for its operation:
+A lone cell earns income only when it is a **cooperator** with an operation that matches a 1-step task in its current tile:
 
 ```
-fitness += BASE + max(0, regional_rewards[op] × coop_reward_scale − coop_cost)
+income    = rvec[cell.operation] × coop_reward_scale   # if cooperator and task_mass > 0
+coop_paid = coop_cost                                   # only when income > 0
+fitness  += income − MAINTENANCE_COST − adhesion_cost − coop_paid
 ```
 
-A lone defector gets only the stipend — cooperation requires being in a cluster to share rewards.
+The result can be negative. A lone defector earns nothing regardless of its operation — defectors withhold computation. A lone cooperator in a tile that does not reward its op also earns nothing.
 
 ### Clusters
-A cluster's fitness is the sum across **all 12 tasks** of (regional reward × scale − defector drain), each only counted if the cluster has the required cooperators:
+A cluster's gross is the sum across **all 12 tasks** of (regional reward × scale − defector drain), each counted only if the cluster has the cooperators required to compute it:
 
 ```
-total_gross = Σ over tasks t:
-    if cluster.can_complete(t):
-        max(0, rvec[t] × coop_reward_scale − DEFECTOR_DRAIN × n_defectors)
-per_cell = total_gross / cluster_size
+total_gross = Σ over tasks t where rvec[t] > 0 and can_complete(t):
+    max(0, rvec[t] × coop_reward_scale − DEFECTOR_DRAIN × n_defectors)
+per_cell    = total_gross / cluster_size
 ```
 
-A 2-step task requires one cooperator with `op1` AND one with `op2`. A 3-step task requires three. This forced **division of computational labour** is what selects for multicellularity.
+A 2-step task requires one cooperator with `op1` AND one with `op2`. A 3-step task requires three. The 1-step variant requires just one cooperator with the matching op. This single loop handles both cases the simulation cares about:
+
+1. **Cluster has the cooperators for a multi-step task in this tile** → that complex reward enters `total_gross` and splits.
+2. **Cluster lacks multi-step cooperators but one cooperator can do a rewarded 1-step task** → that 1-step reward enters `total_gross` and **splits across the entire cluster** (cooperators and defectors alike).
+
+Each cell then updates as:
+
+```
+coop_paid = coop_cost if (cell.is_cooperator and total_gross > 0) else 0
+fitness  += per_cell − adhesion_cost − coop_paid − MAINTENANCE_COST
+```
+
+Forced **division of computational labour** for multi-step tasks is what selects for multicellularity; the per-tile maintenance cost is what punishes idle clusters that cannot complete any task.
 
 ---
 
@@ -135,7 +150,7 @@ Cooperators in a successful cluster pay `COOP_COST = 0.1` per tick on top of the
 Each defector in a cluster reduces every completed task's gross reward by `DEFECTOR_DRAIN = 1.5` (per task, not per cluster — clusters in tiles with many active tasks pay drain on all of them).
 
 ### 3. Within-cluster fitness advantage
-Inside a successful cluster the defector earns `per_cell − adhesion_cost` while the cooperator earns `per_cell − adhesion_cost − COOP_COST`. The defector has a `COOP_COST = 0.1`/tick fitness advantage — the individual selection pressure that should drive defector spread.
+Inside a successful cluster the defector earns `per_cell − adhesion_cost − MAINTENANCE_COST` while the cooperator earns `per_cell − adhesion_cost − MAINTENANCE_COST − COOP_COST`. The defector has a `COOP_COST = 0.1`/tick fitness advantage — the individual selection pressure that should drive defector spread.
 
 The simulation is designed to show **multilevel selection**: individual selection favours defectors *within* clusters, group selection favours cooperator-only clusters *between* groups.
 
