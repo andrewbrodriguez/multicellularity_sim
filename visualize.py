@@ -24,7 +24,8 @@ import numpy as np
 import pandas as pd
 from src.simulation import Simulation
 from src.visualizer import launch_viewer
-from src.environment import BASE_REWARD, SIMPLE_REWARD, COMPLEX_REWARD, TRIPLE_REWARD, DEFECTOR_DRAIN, COOP_COST, REPULSION_RADIUS
+from src.environment import MAINTENANCE_COST, DEFECTOR_DRAIN, COOP_COST, COOP_REWARD_SCALE, REPULSION_RADIUS
+from src.cell import ADHESION_COST
 
 
 # ── output helpers ────────────────────────────────────────────────────────────
@@ -210,12 +211,11 @@ def main() -> None:
         cell_radius=REPULSION_RADIUS,
         regional_tasks=sim.env.regional_rewards,
         reward_params={
-            "base":     BASE_REWARD,
-            "simple":   SIMPLE_REWARD,
-            "complex":  COMPLEX_REWARD,
-            "triple":   TRIPLE_REWARD,
-            "drain":    DEFECTOR_DRAIN,
-            "coop_cost": COOP_COST,
+            "maintenance": MAINTENANCE_COST,
+            "adhesion":    ADHESION_COST,
+            "coop_cost":   COOP_COST,
+            "drain":       DEFECTOR_DRAIN,
+            "scale":       COOP_REWARD_SCALE,
         },
     )
 

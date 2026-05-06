@@ -43,6 +43,10 @@ class Simulation:
         # All four operations as (OP_HIGH, OP_LOW) bit pairs
         ALL_OPS = [(0, 0), (0, 1), (1, 0), (1, 1)]  # AND, OR, XOR, NAND
 
+        # ~20% of seeded cluster cells are defectors (adhesion bit on, coop bit off).
+        # Defectors can no longer infiltrate clusters from outside via bonds, so
+        # seeding some baseline gives the public-goods dynamics a starting pool.
+        DEFECTOR_SEED_FRAC = 0.20
         while placed < n_cluster_cells:
             size = random.randint(2, 4)
             if placed + size > n_cluster_cells:
@@ -57,7 +61,8 @@ class Simulation:
                 genome = np.zeros(8, dtype=np.uint8)
                 genome[0], genome[1] = ops[i]   # distinct operation per cell
                 genome[2] = 1                   # adhesion on
-                genome[3] = 1                   # cooperator
+                # Coin-flip a small fraction as defectors (coop bit off)
+                genome[3] = 0 if random.random() < DEFECTOR_SEED_FRAC else 1
                 cell = Cell(genome=genome, mutation_rate=self.mutation_rate)
                 angle = 2 * np.pi * i / size
                 pos = (
@@ -124,7 +129,8 @@ class Simulation:
                     "coop_rate_lone": 0.0, "def_rate_lone": 0.0,
                     "cluster_rate": 0.0, "lone_rate": 0.0,
                     "multi_advantage": 0.0, "coop_advantage": 0.0,
-                    "cell_records": cell_records, "cluster_groups": []}
+                    "cell_records": cell_records, "cluster_groups": [],
+                    "regional_rewards": self.env.regional_rewards.copy()}
 
         lone         = sum(1 for c in all_cells if c.cluster_id is None)
         # Active phenotypes: only count cells inside clusters.
@@ -195,8 +201,9 @@ class Simulation:
                     "lone_rate":           lone_rate,
                     "multi_advantage":     multi_advantage,
                     "coop_advantage":      coop_advantage,
-                    "cell_records":     cell_records,
-                    "cluster_groups":   cluster_groups,
+                    "cell_records":       cell_records,
+                    "cluster_groups":     cluster_groups,
+                    "regional_rewards":   self.env.regional_rewards.copy(),
                 }
     def _print_stats(self, s: Dict) -> None:
         if s["total_cells"] == 0:

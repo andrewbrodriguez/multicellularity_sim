@@ -262,13 +262,12 @@ def _make_info_widget(reward_params: Optional[Dict]) -> Tuple:
     from qtpy.QtWidgets import QLabel, QWidget, QVBoxLayout
     from qtpy.QtCore import Qt
 
-    rp       = reward_params or {}
-    base     = rp.get("base",      1.0)
-    simple   = rp.get("simple",    3.0)
-    complex_ = rp.get("complex",   5.0)
-    triple   = rp.get("triple",    7.0)
-    drain    = rp.get("drain",     1.5)
-    coop     = rp.get("coop_cost", 0.3)
+    rp           = reward_params or {}
+    maintenance  = rp.get("maintenance", 0.02)
+    adhesion     = rp.get("adhesion",    0.10)
+    coop         = rp.get("coop_cost",   0.10)
+    drain        = rp.get("drain",       1.5)
+    scale        = rp.get("scale",       0.10)
 
     widget = QWidget()
     layout = QVBoxLayout(widget)
@@ -298,15 +297,18 @@ def _make_info_widget(reward_params: Optional[Dict]) -> Tuple:
         "  .sec { font-size: 12px; font-weight: bold; }"
         "</style>"
 
-        "<span class='sec'>REWARD SYSTEM</span><hr>"
+        "<span class='sec'>HEALTH ECONOMICS</span><hr>"
         "<table cellspacing='2'>"
-        f"<tr><td class='k'>Survival (lone)</td><td class='v'>+{base:.1f}/tick</td></tr>"
-        f"<tr><td class='k'>1-step task</td>    <td class='v'>+{simple:.1f}/tick</td></tr>"
-        f"<tr><td class='k'>2-step task</td>    <td class='v'>+{complex_:.1f}/tick</td></tr>"
-        f"<tr><td class='k'>3-step task</td>    <td class='v'>+{triple:.1f}/tick</td></tr>"
-        f"<tr><td class='k'>Defector drain</td> <td class='v'>&minus;{drain:.1f}/defector</td></tr>"
-        f"<tr><td class='k'>Coop cost</td>      <td class='v'>&minus;{coop:.1f}/tick</td></tr>"
+        f"<tr><td class='k'>Maintenance (every cell)</td><td class='v'>&minus;{maintenance:.2f}/tick</td></tr>"
+        f"<tr><td class='k'>Adhesion cost</td>           <td class='v'>&minus;{adhesion:.2f}/tick</td></tr>"
+        f"<tr><td class='k'>Coop cost (when earning)</td><td class='v'>&minus;{coop:.2f}/tick</td></tr>"
+        f"<tr><td class='k'>Defector drain</td>          <td class='v'>&minus;{drain:.2f}/def./task</td></tr>"
+        f"<tr><td class='k'>Reward scale</td>            <td class='v'>&times;{scale:.2f}</td></tr>"
         "</table>"
+        "<small style='color:#666;'>"
+        "No basal income. Health rises only when a cell or its cluster<br>"
+        "completes a rewarded task; otherwise atrophy → starvation."
+        "</small>"
 
         "<br><span class='sec'>REWARD VECTOR REGIONS</span><hr>"
         "<small style='color:#555;'>Each tile = 12-entry vector summing to 15.<br>"
@@ -471,8 +473,25 @@ def launch_viewer(
         scale=spatial_scale,
     )
 
-    # ── regional reward map (static — generated once at startup) ─────────────
-    if regional_tasks is not None:
+    # ── regional reward map (time-varying — one frame per snapshot) ──────────
+    # Pull per-frame rewards from snapshots if available; fall back to the
+    # single static array passed in regional_tasks.
+    snap_rewards = [s.get("regional_rewards") for s in snapshots]
+    if any(r is not None for r in snap_rewards):
+        task_map_stack = np.stack([
+            _render_task_map(r if r is not None else snap_rewards[0],
+                             grid_width, grid_height, VIS_RES)
+            for r in snap_rewards
+        ], axis=0)  # (T, res, res, 4)
+        viewer.add_image(
+            task_map_stack,
+            name="Reward regions",
+            rgb=True,
+            opacity=0.7,
+            blending="translucent",
+            scale=(1,) + spatial_scale,
+        )
+    elif regional_tasks is not None:
         task_map = _render_task_map(regional_tasks, grid_width, grid_height, VIS_RES)
         viewer.add_image(
             task_map,

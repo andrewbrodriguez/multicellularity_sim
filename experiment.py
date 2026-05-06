@@ -55,19 +55,20 @@ SWEEPS = {
         {"coop_cost": 2.00},
         {"coop_cost": 4.00},
         {"coop_cost": 7.50},
+        {"coop_cost": 20.0},
     ],
     # H2: at what reward scale does cooperation become net-positive?
     # Multiplies every regional reward; clusters need this above some
     # threshold to outearn their adhesion+coop costs.
     "reward_scale": [
-        {"coop_reward_scale": 0.02},
-        {"coop_reward_scale": 0.05},
-        {"coop_reward_scale": 0.10},
-        {"coop_reward_scale": 0.15},
+        {"coop_reward_scale": 0.01},
+        {"coop_reward_scale": 0.1},
         {"coop_reward_scale": 0.25},
-        {"coop_reward_scale": 0.40},
-        {"coop_reward_scale": 0.60},
-        {"coop_reward_scale": 1.00},
+        {"coop_reward_scale": 0.5},
+        {"coop_reward_scale": 1.0},
+        {"coop_reward_scale": 1.5},
+        {"coop_reward_scale": 2.5},
+        {"coop_reward_scale": 5.0},
     ],
     # H3: does spatial specialisation favor cooperation?
     # Dirichlet concentration on per-tile reward distribution:
@@ -76,35 +77,39 @@ SWEEPS = {
     "task_alpha": [
         {"task_alpha": 0.01},
         {"task_alpha": 0.05},
-        {"task_alpha": 0.10},
         {"task_alpha": 0.25},
-        {"task_alpha": 0.50},
-        {"task_alpha": 1.00},
-        {"task_alpha": 2.00},
+        {"task_alpha": 1.25},
+        {"task_alpha": 2.0},
         {"task_alpha": 5.00},
+        {"task_alpha": 8.00},
+        {"task_alpha": 10.00},
     ],
     # H4: where does drift overwhelm selection?
     # Asymmetric coop-bit mutation (2× to defect, 0.3× back) means drift
     # always biases toward defection.  Wide range tests both regimes.
     "mutation_rate": [
-        {"mutation_rate": 0.001},
-        {"mutation_rate": 0.005},
-        {"mutation_rate": 0.02},
-        {"mutation_rate": 0.05},
-        {"mutation_rate": 0.10},
-        {"mutation_rate": 0.20},
-        {"mutation_rate": 0.40},
-        {"mutation_rate": 0.70},
+        {"mutation_rate": 0.0001},
+        {"mutation_rate": 0.0003},
+        {"mutation_rate": 0.0009},
+        {"mutation_rate": 0.0027},
+        {"mutation_rate": 0.0081},
+        {"mutation_rate": 0.0243},
+        {"mutation_rate": 0.0729},
+        {"mutation_rate": 0.2187},
     ],
     # H5 (MVG hypothesis): does environmental fluctuation affect the
     # cooperate/defect equilibrium?  task_flip_period re-rolls the entire
     # regional reward landscape every N ticks.
     "task_flip": [
-        {"task_flip_period": None},
-        {"task_flip_period": 50},
-        {"task_flip_period": 100},
-        {"task_flip_period": 250},
         {"task_flip_period": 500},
+        {"task_flip_period": 250},
+        {"task_flip_period": 100},
+        {"task_flip_period": 50},
+        {"task_flip_period": 30},
+        {"task_flip_period": 15},
+        {"task_flip_period": 5},
+        {"task_flip_period": 3},
+        {"task_flip_period": 1},
     ],
     # Headline figure: 2D phase diagram of cooperation as a function of
     # (coop_cost, coop_reward_scale).  4×4 grid → 16 configs.  Each cell
@@ -113,8 +118,8 @@ SWEEPS = {
     # game lives in.
     "phase_diagram": [
         {"coop_cost": cc, "coop_reward_scale": rs}
-        for cc in (0.05, 0.25, 1.0, 4.0)
-        for rs in (0.05, 0.10, 0.25, 0.60)
+        for cc in (0.1, 0.5, 2.0, 4.0)
+        for rs in (0.2, 0.5, 1.0, 2.5)
     ],
 }
 

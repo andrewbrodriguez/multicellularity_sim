@@ -198,14 +198,14 @@ def fig_final_bars(history: pd.DataFrame, sweep_col: str, sweep_name: str) -> pl
         ax.set_xticks(x)
         ax.set_xticklabels(x_labels, rotation=30, ha="right", fontsize=8)
         ax.set_xlabel(sweep_col, fontsize=8)
+        ax.grid(False)
         if ylim:
             ax.set_ylim(*ylim)
         ax.tick_params(labelsize=7)
         # zero-line for advantage plots
         if "advantage" in title.lower():
             ax.axhline(0, color="#ffffff44", lw=1, ls="--")
-
-    fig.suptitle(f"Final-state summary — sweep: {sweep_name}", fontsize=13)
+            
     fig.tight_layout()
     return fig
 
@@ -847,20 +847,14 @@ def fig_phase_diagram(history: pd.DataFrame) -> plt.Figure:
     n_seeds = history["seed"].nunique()
     n_configs = agg.shape[0]
     summary = (
-        f"Phase diagram of the public-goods game\n"
+        f"Some general results from the simulation\n"
         f"\n"
-        f"axes:  coop_cost (rows)  ×  coop_reward_scale (cols)\n"
-        f"grid:  {pivot.shape[0]} × {pivot.shape[1]} = {n_configs} configs\n"
-        f"seeds: {n_seeds} per cell\n"
+        f"axes:  coop_cost (rows)  by  coop_reward_scale (cols)\n"
+        f"grid:  {pivot.shape[0]} by {pivot.shape[1]} = {n_configs} configs\n"
+        f"seeds: average of {n_seeds} seeds per cell\n"
         f"value: mean of metric at final tick\n"
         f"\n"
-        f"Reading the figure:\n"
-        f"  · top-left of each heatmap = high cost, low reward\n"
-        f"    → defector-dominated regime, cooperation collapses\n"
-        f"  · bottom-right = low cost, high reward\n"
-        f"    → cooperators thrive, large stable clusters\n"
-        f"  · the boundary between these regimes is the\n"
-        f"    'phase transition' of cooperation."
+
     )
     ax.text(0.0, 0.95, summary, transform=ax.transAxes,
             fontsize=9.5, va="top", ha="left",
