@@ -1,16 +1,9 @@
 """
 3D surface sweep: mutation_rate × task_flip_period → % multicellular at end of run.
 
-Usage
------
-# default grid (10×10), 500 ticks, 2 seeds
-python 3d_experiment.py
-
-# finer grid, longer run
-python 3d_experiment.py --ticks 1000 --mut-steps 15 --flip-steps 15 --seeds 3
-
-# just regenerate the plot from an existing CSV
-python 3d_experiment.py --plot-only --results-dir results/
+    python 3d_experiment.py                  # default 10×10 grid, 100 ticks, 2 seeds
+    python 3d_experiment.py --ticks 1000 --mut-steps 15 --flip-steps 15 --seeds 3
+    python 3d_experiment.py --plot-only      # re-plot from cached CSV
 """
 
 import argparse

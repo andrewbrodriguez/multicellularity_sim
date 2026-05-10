@@ -1,12 +1,4 @@
-"""
-Interactive 3D surface viewer for the mutation × flip-period sweep.
-
-Usage
------
-python 3d_grapher.py                          # loads results/3d_surface.csv
-python 3d_grapher.py --csv results/3d_surface.csv
-python 3d_grapher.py --smooth                 # Gaussian-smooth the surface
-"""
+"""Interactive 3D surface viewer for the mutation × flip-period sweep CSV (3d_experiment.py output)."""
 
 import argparse
 from pathlib import Path

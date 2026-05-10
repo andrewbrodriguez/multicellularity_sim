@@ -1,18 +1,9 @@
 """
-Graph results from experiment.py CSV outputs.
+Plot the CSVs that experiment.py writes to results/.
 
-Usage
------
-# graph a specific sweep (looks in results/ by default)
-python graph_results.py --sweep population
-python graph_results.py --sweep mutation_rate
-python graph_results.py --sweep task_flip
-
-# custom results directory
-python graph_results.py --sweep population --results-dir my_results/
-
-# save figures instead of showing interactively
-python graph_results.py --sweep population --save-dir figures/
+Usage:
+    python graph_results.py --sweep coop_cost
+    python graph_results.py --sweep mutation_rate --save-dir figures/
 """
 
 import argparse
@@ -21,10 +12,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
 from matplotlib.gridspec import GridSpec
 
-# ── style ─────────────────────────────────────────────────────────────────────
 plt.rcParams.update({
     "figure.facecolor":  "#0e1117",
     "axes.facecolor":    "#1a1d27",
@@ -361,12 +350,7 @@ def fig_selection_heatmap(history: pd.DataFrame, sweep_col: str, sweep_name: str
 # ── figure 5: coop_bonus scatter (coop_reward_scale vs cooperator_pct) ───────
 
 def fig_coop_bonus_scatter(history: pd.DataFrame, cells: pd.DataFrame) -> plt.Figure:
-    """
-    x-axis : coop_reward_scale (the cooperation bonus multiplier)
-    y-axis : cooperator_pct, defector_pct, coop_genome_pct at end of run
-    Each seed is a translucent dot; the bold line is the mean across seeds.
-    A second panel shows cluster genome diversity vs the bonus.
-    """
+    """reward_scale sweep: population mix + selection pressures + cluster diversity vs the multiplier."""
     sweep_col = "coop_reward_scale"
 
     final = (
@@ -455,26 +439,7 @@ def fig_coop_bonus_scatter(history: pd.DataFrame, cells: pd.DataFrame) -> plt.Fi
 # ── figure 6: task_distribution scatter ──────────────────────────────────────
 
 def fig_task_distribution(history: pd.DataFrame, cells: pd.DataFrame) -> plt.Figure:
-    """
-    Four-panel figure showing how task_alpha (Dirichlet concentration) shapes
-    population composition.
-
-    Panel A — population mix vs alpha
-        y: cooperator_pct, defector_pct, coop_genome_pct
-        Interpretation: does enforced spatial specialisation drive more cooperation?
-
-    Panel B — selection pressures vs alpha
-        y: multi_advantage, coop_advantage
-        Interpretation: at what alpha does group selection dominate?
-
-    Panel C — cluster genome diversity vs alpha
-        y: mean distinct ops per cluster
-        Interpretation: concentrated tasks → clusters must be more diverse to cover them.
-
-    Panel D — operation evenness vs alpha (Shannon entropy of op distribution)
-        y: Shannon entropy of operation frequencies across all cells
-        Interpretation: uniform tasks → all ops equally viable; sparse tasks → one op dominates.
-    """
+    """task_alpha sweep: population mix, selection pressures, cluster diversity, op-evenness."""
     sweep_col = "task_alpha"
 
     final = (
@@ -600,14 +565,7 @@ def fig_task_distribution(history: pd.DataFrame, cells: pd.DataFrame) -> plt.Fig
 # ── figure 7: coop_cost scatter ──────────────────────────────────────────────
 
 def fig_coop_cost_scatter(history: pd.DataFrame, cells: pd.DataFrame) -> plt.Figure:
-    """
-    x-axis : coop_cost (metabolic penalty cooperators pay each tick)
-    Three panels:
-      A — cooperator_pct, defector_pct, coop_genome_pct (final state)
-      B — multi_advantage, coop_advantage (selection pressures, final state)
-      C — coop_advantage - (coop_cost × mean_fitness proxy) breakeven line
-    Each seed = translucent dot; bold line = mean across seeds.
-    """
+    """coop_cost sweep: population mix + selection pressures + cooperator% trajectory by cost."""
     sweep_col = "coop_cost"
     final = history.groupby([sweep_col, "seed"]).last().reset_index()
     xs    = np.array(sorted(final[sweep_col].unique()))
@@ -674,16 +632,7 @@ def fig_coop_cost_scatter(history: pd.DataFrame, cells: pd.DataFrame) -> plt.Fig
 # ── figure 8: mutation_penalty scatter ───────────────────────────────────────
 
 def fig_mutation_scatter(history: pd.DataFrame, cells: pd.DataFrame) -> plt.Figure:
-    """
-    x-axis : mutation_rate (log scale)
-    The built-in 2× coop→def / 0.3× def→coop asymmetry means higher mutation
-    rate = stronger drift toward defection.
-
-    Three panels:
-      A — cooperator_pct, defector_pct, coop_genome_pct (final state)
-      B — cluster genome diversity (unique ops / cluster) vs mutation_rate
-      C — timeseries of cooperator_pct at each mutation level
-    """
+    """mutation_rate sweep: population mix + cluster diversity + coop_advantage trajectory by μ."""
     sweep_col = "mutation_rate"
     final = history.groupby([sweep_col, "seed"]).last().reset_index()
     xs    = np.array(sorted(final[sweep_col].unique()))
@@ -758,14 +707,7 @@ def fig_mutation_scatter(history: pd.DataFrame, cells: pd.DataFrame) -> plt.Figu
 # ── figure: 2D phase diagram (headline figure) ───────────────────────────────
 
 def fig_phase_diagram(history: pd.DataFrame) -> plt.Figure:
-    """
-    Headline figure: cooperator% / defector% / avg cluster size / population
-    on the (coop_cost, coop_reward_scale) plane.
-
-    Each panel is a heatmap whose cells are mean-across-seeds of the
-    metric at the final tick.  This is the 2D phase diagram of the
-    public-goods game the simulation models.
-    """
+    """Heatmaps of final-tick metrics on the (coop_cost, coop_reward_scale) plane."""
     if "coop_cost" not in history.columns or "coop_reward_scale" not in history.columns:
         raise ValueError("phase_diagram requires both coop_cost and coop_reward_scale columns")
 

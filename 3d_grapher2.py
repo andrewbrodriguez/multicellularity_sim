@@ -1,12 +1,4 @@
-"""
-Interactive 3D viewer for the single_frac × task_alpha sweep.
-
-Usage
------
-python 3d_grapher2.py
-python 3d_grapher2.py --csv results/3d_mass.csv
-python 3d_grapher2.py --smooth
-"""
+"""Interactive 3D surface viewer for the single_frac × task_alpha sweep CSV (3d_experiment2.py output)."""
 
 import argparse
 from pathlib import Path

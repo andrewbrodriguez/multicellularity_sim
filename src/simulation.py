@@ -7,62 +7,56 @@ from .cell import Cell
 
 class Simulation:
     def __init__(
-            self,
-            grid_size: int = 250,
-            initial_cells: int = 10,
-            mutation_rate: float = 0.005,
-            seed: Optional[int] = None,
-            task_flip_period: Optional[int] = None,
-            coop_reward_scale: Optional[float] = None,
-            task_alpha: Optional[float] = None,
-            coop_cost: Optional[float] = None,
-        ) -> None:
-            env_kwargs = dict(width=grid_size, height=grid_size,
-                              seed=seed, task_flip_period=task_flip_period)
-            if coop_reward_scale is not None:
-                env_kwargs["coop_reward_scale"] = coop_reward_scale
-            if task_alpha is not None:
-                env_kwargs["task_alpha"] = task_alpha
-            if coop_cost is not None:
-                env_kwargs["coop_cost"] = coop_cost
-            self.env = Environment(**env_kwargs)
-            self.mutation_rate = mutation_rate
-            
-            # These two lines were accidentally dropped! 
-            # They are required to track stats and spawn the starting cells.
-            self.history: List[Dict] = []
-            self._seed_population(initial_cells)
+        self,
+        grid_size: int = 250,
+        initial_cells: int = 10,
+        mutation_rate: float = 0.005,
+        seed: Optional[int] = None,
+        task_flip_period: Optional[int] = None,
+        coop_reward_scale: Optional[float] = None,
+        task_alpha: Optional[float] = None,
+        coop_cost: Optional[float] = None,
+    ) -> None:
+        env_kwargs = dict(width=grid_size, height=grid_size,
+                          seed=seed, task_flip_period=task_flip_period)
+        if coop_reward_scale is not None:
+            env_kwargs["coop_reward_scale"] = coop_reward_scale
+        if task_alpha is not None:
+            env_kwargs["task_alpha"] = task_alpha
+        if coop_cost is not None:
+            env_kwargs["coop_cost"] = coop_cost
+        self.env = Environment(**env_kwargs)
+        self.mutation_rate = mutation_rate
+
+        self.history: List[Dict] = []
+        self._seed_population(initial_cells)
 
     def _seed_population(self, n: int) -> None:
+        # Seed ~40% of cells as pre-formed cooperator clusters of 2-4 cells with
+        # distinct ops — gives the simulation a working starting pool instead of
+        # waiting tens of thousands of ticks for random adhesion to find one.
+        # ~20% of seeded cluster cells are defectors so the public-goods
+        # dynamics have something to operate on from the start.
         from .cluster import Cluster
-        import random, numpy as np
+        import random
 
-        # Seed ~40% of cells as pre-formed clusters of 2-4 cooperators
         n_cluster_cells = int(n * 0.4)
         placed = 0
-        # All four operations as (OP_HIGH, OP_LOW) bit pairs
         ALL_OPS = [(0, 0), (0, 1), (1, 0), (1, 1)]  # AND, OR, XOR, NAND
-
-        # ~20% of seeded cluster cells are defectors (adhesion bit on, coop bit off).
-        # Defectors can no longer infiltrate clusters from outside via bonds, so
-        # seeding some baseline gives the public-goods dynamics a starting pool.
         DEFECTOR_SEED_FRAC = 0.20
+
         while placed < n_cluster_cells:
             size = random.randint(2, 4)
             if placed + size > n_cluster_cells:
                 break
-            # Assign distinct operations to each cell — no two members share an op.
-            # This seeds genuine complementarity: the cluster can immediately attempt
-            # multi-step tasks that require different operations.
-            ops = random.sample(ALL_OPS, size)
+            ops = random.sample(ALL_OPS, size)   # distinct op per cell
             anchor = self.env.find_empty_position(seeding=True)
             cl = Cluster()
             for i in range(size):
                 genome = np.zeros(8, dtype=np.uint8)
-                genome[0], genome[1] = ops[i]   # distinct operation per cell
-                genome[2] = 1                   # adhesion on
-                # Coin-flip a small fraction as defectors (coop bit off)
-                genome[3] = 0 if random.random() < DEFECTOR_SEED_FRAC else 1
+                genome[0], genome[1] = ops[i]
+                genome[2] = 1                                                  # adhesion on
+                genome[3] = 0 if random.random() < DEFECTOR_SEED_FRAC else 1   # cooperator bit
                 cell = Cell(genome=genome, mutation_rate=self.mutation_rate)
                 angle = 2 * np.pi * i / size
                 pos = (
@@ -74,7 +68,6 @@ class Simulation:
             self.env.clusters[cl.cluster_id] = cl
             placed += size
 
-        # Remaining cells seeded as lone individuals (mixed random genomes)
         for _ in range(n - placed):
             cell = Cell(mutation_rate=self.mutation_rate)
             self.env.place_cell(cell, self.env.find_empty_position(seeding=True))
@@ -113,7 +106,6 @@ class Simulation:
                 "div_progress": div_progress,
             })
 
-        # Positions of cells in each cluster (≥2 members) for adhesion bond drawing
         cluster_groups = [
             [c.position for c in cl.cells if c.position is not None]
             for cl in self.env.clusters.values()
@@ -133,11 +125,10 @@ class Simulation:
                     "regional_rewards": self.env.regional_rewards.copy()}
 
         lone         = sum(1 for c in all_cells if c.cluster_id is None)
-        # Active phenotypes: only count cells inside clusters.
-        # A lone cell with cooperator-bit=1 is not yet cooperating with anyone.
+        # Active phenotypes count only in-cluster cells: a lone cell with the
+        # cooperator bit isn't actually cooperating with anyone.
         cooperators  = sum(1 for c in all_cells if c.cluster_id is not None and c.is_cooperator)
         defectors    = sum(1 for c in all_cells if c.cluster_id is not None and c.is_defector)
-        # Genome-level statistic: how many cells carry the cooperator allele at all
         coop_genome  = sum(1 for c in all_cells if c.is_cooperator)
         mean_fit     = float(np.mean([c.fitness for c in all_cells]))
         num_clusters = len(self.env.clusters)
@@ -147,22 +138,17 @@ class Simulation:
         )
 
         # Selection-pressure metrics: fitness-per-tick by phenotype.
-        # These make the two selection gradients explicit:
-        #   multi_advantage = (clustered coop) vs (lone)    → group selection
-        #   coop_advantage  = (clustered coop) vs (defector) → individual selection
+        #   multi_advantage = (clustered) − (lone)            → group selection
+        #   coop_advantage  = (clustered coop) − (defector)   → individual selection
         def _rate(cells):
             if not cells:
                 return 0.0
             return float(np.mean([c.fitness / max(c.age, 1) for c in cells]))
 
-        clustered_coops = [c for c in all_cells
-                           if c.cluster_id is not None and c.is_cooperator]
-        clustered_defs  = [c for c in all_cells
-                           if c.cluster_id is not None and c.is_defector]
-        lone_coops      = [c for c in all_cells
-                           if c.cluster_id is None and c.is_cooperator]
-        lone_defs       = [c for c in all_cells
-                           if c.cluster_id is None and not c.is_cooperator]
+        clustered_coops = [c for c in all_cells if c.cluster_id is not None and c.is_cooperator]
+        clustered_defs  = [c for c in all_cells if c.cluster_id is not None and c.is_defector]
+        lone_coops      = [c for c in all_cells if c.cluster_id is None and c.is_cooperator]
+        lone_defs       = [c for c in all_cells if c.cluster_id is None and not c.is_cooperator]
 
         coop_rate_clustered = _rate(clustered_coops)
         def_rate_clustered  = _rate(clustered_defs)
@@ -171,40 +157,34 @@ class Simulation:
         cluster_rate        = _rate(clustered_coops + clustered_defs)
         lone_rate           = _rate(lone_coops + lone_defs)
 
-        # Positive → multicellularity pays; negative → going solo is better.
-        multi_advantage = cluster_rate - lone_rate
-        # Positive → cooperation pays inside clusters; negative → defection wins.
-        coop_advantage  = coop_rate_clustered - def_rate_clustered
-
         clustered = n - lone
         return {
-                    "tick":             tick,
-                    "total_cells":      n,
-                    "lone_cells":       lone,
-                    "clustered_cells":  clustered,
-                    "num_clusters":     num_clusters,
-                    "avg_cluster_size": avg_cl_size,
-                    "cooperators":      cooperators,
-                    "defectors":        defectors,
-                    # % of ALL cells actively cooperating / defecting in a cluster
-                    "cooperator_pct":   100.0 * cooperators / n,
-                    "defector_pct":     100.0 * defectors / n,
-                    # % of all cells carrying the cooperator allele (genome level)
-                    "coop_genome_pct":  100.0 * coop_genome / n,
-                    "mean_fitness":     mean_fit,
-                    "current_task":     self.env.current_task_str,
-                    "coop_rate_clustered": coop_rate_clustered,
-                    "def_rate_clustered":  def_rate_clustered,
-                    "coop_rate_lone":      coop_rate_lone,
-                    "def_rate_lone":       def_rate_lone,
-                    "cluster_rate":        cluster_rate,
-                    "lone_rate":           lone_rate,
-                    "multi_advantage":     multi_advantage,
-                    "coop_advantage":      coop_advantage,
-                    "cell_records":       cell_records,
-                    "cluster_groups":     cluster_groups,
-                    "regional_rewards":   self.env.regional_rewards.copy(),
-                }
+            "tick":             tick,
+            "total_cells":      n,
+            "lone_cells":       lone,
+            "clustered_cells":  clustered,
+            "num_clusters":     num_clusters,
+            "avg_cluster_size": avg_cl_size,
+            "cooperators":      cooperators,
+            "defectors":        defectors,
+            "cooperator_pct":   100.0 * cooperators / n,
+            "defector_pct":     100.0 * defectors / n,
+            "coop_genome_pct":  100.0 * coop_genome / n,
+            "mean_fitness":     mean_fit,
+            "current_task":     self.env.current_task_str,
+            "coop_rate_clustered": coop_rate_clustered,
+            "def_rate_clustered":  def_rate_clustered,
+            "coop_rate_lone":      coop_rate_lone,
+            "def_rate_lone":       def_rate_lone,
+            "cluster_rate":        cluster_rate,
+            "lone_rate":           lone_rate,
+            "multi_advantage":     cluster_rate - lone_rate,
+            "coop_advantage":      coop_rate_clustered - def_rate_clustered,
+            "cell_records":        cell_records,
+            "cluster_groups":      cluster_groups,
+            "regional_rewards":    self.env.regional_rewards.copy(),
+        }
+
     def _print_stats(self, s: Dict) -> None:
         if s["total_cells"] == 0:
             print(f"Tick {s['tick']:5d} | POPULATION EXTINCT")

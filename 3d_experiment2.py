@@ -1,38 +1,15 @@
 """
-3D surface sweep: how mass partition × distribution sparsity drives multicellularity.
+3D surface sweep: mass partition × landscape sparsity → multicellularity.
 
-Total reward mass per tile is held FIXED at TOTAL_MASS.  Two things vary:
+X = single_frac (fraction of tile mass in 1-step tasks; remainder split equally
+across 2-step and 3-step tiers). Y = task_alpha (Dirichlet concentration inside
+each tier — low α = one slot hoards mass, high α = uniform). Z = final %
+multicellular. Total mass per tile is held fixed at TOTAL_MASS so we isolate
+the *shape* of the landscape from its richness.
 
-  X axis — single_frac:  fraction of total tile mass allocated to 1-step tasks.
-                         single_mass = round(TOTAL_MASS * single_frac)
-                         The remainder is split equally between the 2-step and
-                         3-step tiers (DOUBLE_MASS = TRIPLE_MASS = remainder/2).
-                         single_frac = 0   → all mass in multi-step tasks
-                         single_frac = 1   → all mass in 1-step tasks
-
-  Y axis — task_alpha:   Dirichlet concentration controlling sparsity inside
-                         each tier.  Low α => one task slot in the tier hoards
-                         the mass (specialised landscape).  High α => mass is
-                         spread evenly across the four slots in each tier.
-
-  Z      — % multicellular at end of run.
-
-Holding total mass fixed isolates the *shape* of the reward landscape from its
-overall richness.  The expected behaviour:
-  • single_frac → 1 :  lone cells should win regardless of α
-  • single_frac → 0 :  clusters should win, but only if α is high enough that
-                       a tile is likely to reward a task the cluster can
-                       actually compute
-  • low α + low single_frac → spiky multi-step landscape: clusters need to
-                              match a specific multi-step task, hard to do
-  • high α + low single_frac → uniform multi-step landscape: clusters always
-                               find something to compute
-
-Usage
------
-python 3d_experiment2.py                     # 21×21 grid, 3 seeds, 500 ticks
-python 3d_experiment2.py --ticks 1000 --steps 15 --seeds 5
-python 3d_experiment2.py --plot-only
+    python 3d_experiment2.py                      # default 21×21, 3 seeds, 500 ticks
+    python 3d_experiment2.py --ticks 1000 --steps 15 --seeds 5
+    python 3d_experiment2.py --plot-only
 """
 
 import argparse

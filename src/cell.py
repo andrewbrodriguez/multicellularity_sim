@@ -4,11 +4,11 @@ from typing import Optional, Tuple
 GENOME_LENGTH = 8
 
 # Genome bit indices
-OP_HIGH    = 0  # operation MSB  \  00=AND  01=OR
-OP_LOW     = 1  # operation LSB   > 10=XOR  11=NAND
-ADHESION   = 2  # 1 = adhesion allele expressed (metabolic cost)
-COOPERATOR = 3  # 1 = contributes computation to cluster; 0 = defector
-# bits 4-7: reserved for future traits (e.g. signalling, apoptosis)
+OP_HIGH    = 0  # operation MSB \  00=AND  01=OR
+OP_LOW     = 1  # operation LSB  > 10=XOR  11=NAND
+ADHESION   = 2
+COOPERATOR = 3
+# bits 4-7: reserved
 
 _OP_MAP = {
     (0, 0): "AND",
@@ -17,13 +17,9 @@ _OP_MAP = {
     (1, 1): "NAND",
 }
 
-ADHESION_COST = 0.1   # metabolic penalty per tick for expressing adhesion
+ADHESION_COST = 0.1
 
-# Cell health: accumulates when a cell is net-positive; replication is gated
-# on health reaching the division threshold.  Resets to 0 after division.
-# Growth rate of 1.0/tick means a lone cell (~50 threshold) divides in ~50 ticks
-# when earning steadily; clusters (~100/cell) take proportionally longer.
-NEWBORN_HEALTH  = 0.0
+NEWBORN_HEALTH     = 0.0
 HEALTH_GROWTH_RATE = 1.0
 
 
@@ -59,7 +55,7 @@ class Cell:
         self.age:                  int   = 0
         self.fitness:              float = 0.0
         self.health:               float = NEWBORN_HEALTH
-        self.cluster_id:           Optional[int]             = None
+        self.cluster_id:           Optional[int]                 = None
         self.position:             Optional[Tuple[float, float]] = None
         self.velocity:             Tuple[float, float]           = (0.0, 0.0)
         self.replication_cooldown: int   = 0
@@ -67,28 +63,24 @@ class Cell:
         self._parse_genome()
 
     def _parse_genome(self) -> None:
-        self.operation:    str  = _OP_MAP[(int(self.genome[OP_HIGH]), int(self.genome[OP_LOW]))]
+        self.operation:     str  = _OP_MAP[(int(self.genome[OP_HIGH]), int(self.genome[OP_LOW]))]
         self.is_cooperator: bool = bool(self.genome[COOPERATOR])
-        # Adhesion is now strictly the adhesion bit — cooperators no longer force it.
-        self.has_adhesion: bool = bool(self.genome[ADHESION])
+        self.has_adhesion:  bool = bool(self.genome[ADHESION])
 
-    # A bond between two cells requires BOTH endpoints to express
-    # adhesion AND carry the cooperator bit.  Defectors arise only via
-    # cooperator → defector mutation after the bond has already formed.
+    # Bonds require BOTH endpoints to carry adhesion AND cooperator bits;
+    # defectors only arise via post-bond mutation, never by joining as defectors.
     @property
     def can_form_bond(self) -> bool:
         return self.is_cooperator and self.has_adhesion
 
-    # A defector: in a cluster but withholds computation (cooperator bit off).
     @property
     def is_defector(self) -> bool:
         return self.has_adhesion and not self.is_cooperator
 
     @property
     def adhesion_cost(self) -> float:
-        # Defectors free-ride on cluster cohesion too — they express adhesion
-        # but don't pay the metabolic upkeep.  This makes them strictly cheaper
-        # to maintain than cooperators, which is the whole point of the cheating.
+        # Defectors free-ride on cluster cohesion: they express adhesion but
+        # don't pay its upkeep — strictly cheaper to maintain than cooperators.
         if not self.has_adhesion:
             return 0.0
         return 0.0 if self.is_defector else ADHESION_COST
@@ -98,20 +90,16 @@ class Cell:
 
     def tick(self) -> None:
         self.age += 1
-        # Health accumulates when net-positive.  Defectors are an exception:
-        # they parasitically draw from the cluster's shared pool and accumulate
-        # health even when the cluster's net-fitness is flat — the cancer-like
-        # property of dividing regardless of host metabolic state.
         if self.fitness > 0:
             self.health += HEALTH_GROWTH_RATE
         elif self.is_defector and self.cluster_id is not None:
+            # Defectors compound from the cluster's pool even when net fitness
+            # is flat — the cancer-like property of dividing regardless of host state.
             self.health += HEALTH_GROWTH_RATE * 0.5
 
     def mutate(self) -> "Cell":
-        # Strongly asymmetric mutation on the cooperator bit: cheating is
-        # biologically far easier to evolve than cooperation.  The 8×/0.3×
-        # bias forces the genetic filter to do real work to keep clusters
-        # cooperative — otherwise defectors emerge constantly.
+        # Asymmetric coop-bit mutation (8× toward defection, 0.3× back) forces
+        # the genetic filter to do real work — otherwise defectors emerge constantly.
         new_genome = self.genome.copy()
 
         if new_genome[COOPERATOR] == 1:

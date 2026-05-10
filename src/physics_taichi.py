@@ -1,32 +1,24 @@
 """
-GPU-accelerated physics following Cell_Sim_2 (Rodriguez et al. 2026).
+GPU-accelerated physics (Taichi). Falls back to CPU if no Metal/CUDA device.
 
-Architecture (Fig. 4 / Fig. 13 of the paper):
-  Every tick:
-    1. Build spatial hash grid (10µm × 10µm cells)
-    2. update_velocity  — sum Gaussian pairwise forces → normalise → scale by motility → damp
-    3. update_position  — apply velocity + Brownian displacement → elastic wall reflection
+Per tick:
+  1. Build a 10 µm spatial-hash grid
+  2. update_velocity — sum pairwise Gaussian forces over the 11×11 bucket
+     neighbourhood, normalise → scale by motility (nearest-neighbour/2) → damp
+  3. update_position — apply velocity + Brownian displacement, then elastic
+     wall reflection
 
-Force function (§3.2):
-    F(d) = A(d) − REPULSE_SCALE × R(d)
-    A(d) = exp(−0.5·((d − ATTRACT_MU)  / ATTRACT_SIGMA)²)   ← attractive well ~35 µm
-    R(d) = exp(−0.5·((d − REPULSE_MU)  / REPULSE_SIGMA)²)   ← repulsive core  ~0 µm
-
-    A(d) is included only when BOTH cells are in clusters
-    (paper: attraction is dropped when either cell is "differentiated").
-
-Velocity integration (§2.3):
-    v_new = α · v_old  +  M_i · F̂_sum
-    x_new = x_old + v_new + √(2D) · ξ
-    where M_i = d_nearest_neighbour / 2  (motility limit, §3.3)
-
-Falls back silently to CPU if no Metal/CUDA device is found.
+Force model (Cell_Sim_2, Rodriguez et al. 2026):
+    F(d) = A(d) − REPULSE_SCALE · R(d)
+    A(d) = exp(−0.5·((d − ATTRACT_MU) / ATTRACT_SIGMA)²)   ← attractive well ~35 µm
+    R(d) = exp(−0.5·((d − REPULSE_MU) / REPULSE_SIGMA)²)   ← repulsive core  ~0 µm
+A(d) is included only when both cells are in the SAME cluster — cross-cluster
+attraction would wrongly fuse independent cooperative groups together.
 """
 
 import numpy as np
 import taichi as ti
 
-# ── one-time Taichi initialisation ────────────────────────────────────────────
 try:
     ti.init(arch=ti.gpu, log_level=ti.WARN)
     _BACKEND = "gpu"
@@ -34,38 +26,34 @@ except Exception:
     ti.init(arch=ti.cpu, log_level=ti.WARN)
     _BACKEND = "cpu"
 
-# ── physics parameters (§2.3, §3.2, Appendix A) ──────────────────────────────
-ALPHA            = 0.12    # velocity retention (damping), learned param from paper
-DIFFUSION_SIGMA  = 0.492   # √(2·D·Δt), D=1.21e-7 mm²/min → 0.121 µm²/tick
-ATTRACT_MU       = 35.0    # µm — attractive Gaussian centre
+# physics parameters
+ALPHA            = 0.12    # velocity retention (damping)
+DIFFUSION_SIGMA  = 0.492   # √(2·D·Δt), D = 1.21e-7 mm²/min
+ATTRACT_MU       = 35.0    # µm
 ATTRACT_SIGMA    = 5.0     # µm
-REPULSE_MU       = -12.5   # µm — repulsive Gaussian centre (strong at d≈0)
+REPULSE_MU       = -12.5   # µm
 REPULSE_SIGMA    = 10.0    # µm
-REPULSE_SCALE    = 50.0    # learned parameter: ratio of repulsive to attractive magnitude
-MAX_DISPLACEMENT = 4.0     # µm/tick hard cap (our constraint)
+REPULSE_SCALE    = 50.0
+MAX_DISPLACEMENT = 4.0     # µm/tick hard cap
 
-# ── spatial hash (§2.1): 10 µm grid cells, 11×11 neighbourhood ───────────────
-HASH_CELL      = 10.0   # µm — matches paper's 10 µm × 10 µm grid
-MAX_GRID_DIM   = 200    # max buckets per axis → supports world up to 2000 µm/side
-MAX_BUCKETS    = MAX_GRID_DIM * MAX_GRID_DIM   # 40_000
-MAX_PER_BKT    = 32     # generous upper bound per bucket at our densities
-NBHD_HALF      = 5      # ±5 buckets → 11×11 = 110 µm neighbourhood
-MAX_CELLS      = 12_000   # headroom above environment.py MAX_CELLS=10_000 for burst replication
+# spatial hash: 10 µm grid cells, 11×11 neighbourhood
+HASH_CELL    = 10.0
+MAX_GRID_DIM = 200          # max buckets/axis → world up to 2000 µm/side
+MAX_BUCKETS  = MAX_GRID_DIM * MAX_GRID_DIM
+MAX_PER_BKT  = 32
+NBHD_HALF    = 5
+MAX_CELLS    = 12_000       # headroom above environment.MAX_CELLS for burst replication
 
-# ── Taichi fields ─────────────────────────────────────────────────────────────
 _pos       = ti.Vector.field(2, dtype=ti.f32, shape=MAX_CELLS)
-_vel       = ti.Vector.field(2, dtype=ti.f32, shape=MAX_CELLS)  # persistent velocity
-_cid       = ti.field(dtype=ti.i32, shape=MAX_CELLS)            # cluster id; -1 = lone
+_vel       = ti.Vector.field(2, dtype=ti.f32, shape=MAX_CELLS)
+_cid       = ti.field(dtype=ti.i32, shape=MAX_CELLS)
 _bkt_count = ti.field(dtype=ti.i32, shape=MAX_BUCKETS)
 _bkt_cells = ti.field(dtype=ti.i32, shape=(MAX_BUCKETS, MAX_PER_BKT))
 
-# numpy staging buffers (reused each tick to avoid reallocation)
 _pos_buf = np.zeros((MAX_CELLS, 2), dtype=np.float32)
 _vel_buf = np.zeros((MAX_CELLS, 2), dtype=np.float32)
 _cid_buf = np.full(MAX_CELLS, -1,   dtype=np.int32)
 
-
-# ── kernels ───────────────────────────────────────────────────────────────────
 
 @ti.kernel
 def _clear_hash():
@@ -75,7 +63,6 @@ def _clear_hash():
 
 @ti.kernel
 def _build_hash(n: int, grid_w: int, grid_h: int):
-    """Place each living cell into its 10 µm grid bucket (O(N), fully parallel)."""
     for i in range(n):
         gx = int(ti.floor(_pos[i][0] / HASH_CELL))
         gy = int(ti.floor(_pos[i][1] / HASH_CELL))
@@ -89,15 +76,6 @@ def _build_hash(n: int, grid_w: int, grid_h: int):
 
 @ti.kernel
 def _update_velocity(n: int, grid_w: int, grid_h: int):
-    """
-    For each cell i, sum pairwise Gaussian forces from all neighbours
-    within the 11×11 bucket neighbourhood (≤ 110 µm).
-
-    Then:
-      v_new = α·v_old + M_i · F̂_sum
-    where M_i = nearest_neighbour_dist / 2  (§3.3 motility limit).
-    Velocity is clamped to MAX_DISPLACEMENT before writing.
-    """
     for i in range(n):
         xi = _pos[i]
         ci = _cid[i]
@@ -129,17 +107,12 @@ def _update_velocity(n: int, grid_w: int, grid_h: int):
                                     if d < min_d:
                                         min_d = d
 
-                                    # ── Gaussian force function (§3.2) ────────
-                                    # Repulsive component: always applied
                                     r_val = ti.exp(
                                         -0.5 * ((d - REPULSE_MU) / REPULSE_SIGMA) ** 2
                                     )
                                     f_scalar = -REPULSE_SCALE * r_val
 
-                                    # Attractive component: only between cells in
-                                    # the SAME cluster — intra-cluster cohesion only.
-                                    # Cross-cluster attraction would wrongly pull
-                                    # independent cooperative groups together.
+                                    # Attraction only between same-cluster cells
                                     if ci >= 0 and ci == cj:
                                         a_val = ti.exp(
                                             -0.5 * ((d - ATTRACT_MU) / ATTRACT_SIGMA) ** 2
@@ -148,19 +121,15 @@ def _update_velocity(n: int, grid_w: int, grid_h: int):
 
                                     fi += f_scalar * unit
 
-        # motility limit M_i = nearest-neighbour dist / 2 (§3.3)
-        nn_d = min_d if min_d < 1e8 else 100.0
+        nn_d     = min_d if min_d < 1e8 else 100.0
         motility = nn_d * 0.5
 
-        # normalise cumulative force to a unit vector, then scale by M_i
         f_mag  = fi.norm()
         f_safe = f_mag if f_mag > 1e-10 else 1.0
         fi_hat = fi * (1.0 / f_safe) * (1.0 if f_mag > 1e-10 else 0.0)
 
-        # velocity update with damping (§2.3): v_new = α·v_old + M_i·F̂
         v_new = ALPHA * _vel[i] + fi_hat * motility
 
-        # clamp velocity magnitude to MAX_DISPLACEMENT µm/tick
         v_mag = v_new.norm()
         if v_mag > MAX_DISPLACEMENT:
             v_new = v_new * (MAX_DISPLACEMENT / v_mag)
@@ -170,12 +139,8 @@ def _update_velocity(n: int, grid_w: int, grid_h: int):
 
 @ti.kernel
 def _update_position(n: int, world_w: float, world_h: float):
-    """
-    Integrate position: x_new = x + v + √(2D)·ξ  (§2.3 Brownian term).
-    Elastic wall reflection applied after (§2.4).
-    """
     for i in range(n):
-        # Brownian displacement: Box-Muller → two independent Gaussians
+        # Box-Muller → two independent Gaussians for Brownian displacement
         u1 = ti.max(ti.random(ti.f32), 1e-7)
         u2 = ti.random(ti.f32)
         u3 = ti.max(ti.random(ti.f32), 1e-7)
@@ -188,7 +153,7 @@ def _update_position(n: int, world_w: float, world_h: float):
         px = p[0]
         py = p[1]
 
-        # elastic wall reflection (§2.4)
+        # elastic wall reflection
         if px < 0.0:
             px = -px
         if px > world_w:
@@ -204,21 +169,14 @@ def _update_position(n: int, world_w: float, world_h: float):
         _pos[i] = ti.Vector([px, py])
 
 
-# ── public API ────────────────────────────────────────────────────────────────
-
 def step(
-    positions:   np.ndarray,   # (n, 2) float64, world µm coords
-    velocities:  np.ndarray,   # (n, 2) float64, µm/tick (persistent across ticks)
-    cluster_ids: np.ndarray,   # (n,)   int32; -1 = lone cell
+    positions:   np.ndarray,   # (n, 2) world µm coords
+    velocities:  np.ndarray,   # (n, 2) µm/tick (persistent across ticks)
+    cluster_ids: np.ndarray,   # (n,) int32; -1 = lone cell
     world_w:     float,
     world_h:     float,
 ) -> tuple:
-    """
-    Run one physics tick on the GPU.
-
-    Returns (new_positions (n,2) float64, new_velocities (n,2) float64).
-    Caller is responsible for storing velocities and passing them back each tick.
-    """
+    """Run one physics tick. Returns (new_positions, new_velocities) as float64."""
     n = len(positions)
     if n == 0:
         return positions, velocities
@@ -243,8 +201,8 @@ def step(
 
     _clear_hash()
     _build_hash(n, grid_w, grid_h)
-    _update_velocity(n, grid_w, grid_h)                 # writes _vel
-    _update_position(n, float(world_w), float(world_h)) # reads _vel, writes _pos
+    _update_velocity(n, grid_w, grid_h)
+    _update_position(n, float(world_w), float(world_h))
 
     new_pos = _pos.to_numpy()[:n].astype(np.float64)
     new_vel = _vel.to_numpy()[:n].astype(np.float64)

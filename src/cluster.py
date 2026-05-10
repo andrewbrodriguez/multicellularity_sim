@@ -13,8 +13,6 @@ class Cluster:
         self.age:                  int        = 0
         self.replication_cooldown: int        = 0
 
-    # ── membership ──────────────────────────────────────────────────────────
-
     def add_cell(self, cell: Cell) -> None:
         cell.cluster_id = self.cluster_id
         self.cells.append(cell)
@@ -22,8 +20,6 @@ class Cluster:
     def remove_cell(self, cell: Cell) -> None:
         self.cells = [c for c in self.cells if c.cell_id != cell.cell_id]
         cell.cluster_id = None
-
-    # ── computation ─────────────────────────────────────────────────────────
 
     def can_complete_task(self, op1: str, op2: Optional[str] = None, op3: Optional[str] = None) -> bool:
         has_op1 = any(c.is_cooperator and c.operation == op1 for c in self.cells)
@@ -41,7 +37,6 @@ class Cluster:
         op1: str, op2: Optional[str] = None, op3: Optional[str] = None,
         d: int = 0,
     ) -> Optional[int]:
-        """1-, 2-, or 3-step task. Each step requires a cooperator with the matching operation."""
         cell1 = next((cell for cell in self.cells if cell.is_cooperator and cell.operation == op1), None)
         if cell1 is None:
             return None
@@ -60,25 +55,17 @@ class Cluster:
         if cell3 is None:
             return None
         return cell3.compute(result2, d)
-    
-
-    # ── lifecycle ────────────────────────────────────────────────────────────
 
     def tick(self) -> None:
-        """Age the cluster; individual cells are ticked separately in Environment."""
         self.age += 1
 
     def replicate(self) -> "Cluster":
-        """
-        Cluster-level replication: every member cell copies and mutates together.
-        This is the unit-of-selection shift from individual to group.
-        """
+        # Cluster-level replication: every member copies and mutates together —
+        # the unit-of-selection shift from individual to group.
         offspring = Cluster()
         for cell in self.cells:
             offspring.add_cell(cell.mutate())
         return offspring
-
-    # ── properties ───────────────────────────────────────────────────────────
 
     @property
     def size(self) -> int:

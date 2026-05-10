@@ -1,39 +1,29 @@
 """
-Napari visualizer for the multicellularity simulation.
+Napari visualizer for the simulation.
 
-Layers
-------
-  "environment"    — (T, RES, RES, 3) Gaussian density heatmap on agarose background.
-                     Red = defectors, Blue = cooperators, Dark gray = lone cells.
-  "Adhesion bonds" — time-resolved line segments between nearest cluster-mates only.
-  "Lone cells"     — point cloud, gray
-  "Cooperators"    — point cloud, blue
-  "Defectors"      — point cloud, red
-
-Dock widget (right panel) shows reward system constants and the current task,
-updating live as the time slider is scrubbed.
+Layers: environment heatmap (per-type Gaussian density on agarose background),
+adhesion bonds (lines), one point cloud each for lone / cooperator / defector
+cells. The right-side dock widget shows reward economics and per-tick
+selection-pressure stats; both update as the time slider is scrubbed.
 """
 
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 
-VIS_RES = 400   # pixel resolution of the rendered heatmap image
+VIS_RES = 400
 
-# Warm pale yellow — colour of agarose gel under bright-field illumination
 AGAROSE_BG = np.array([1.0, 0.97, 0.82], dtype=np.float32)
 
-# RGBA for point layers (shown on top of heatmap)
 _PT_RGBA = {
     0: [0.50, 0.50, 0.50, 0.90],   # lone   – gray
     1: [0.15, 0.45, 1.00, 0.95],   # coop   – blue
     2: [1.00, 0.18, 0.18, 0.95],   # defect – red
 }
 
-# Linear-RGB colours for the Gaussian density heatmap
 _HMAP_RGB = {
-    0: np.array([0.35, 0.35, 0.35], dtype=np.float32),  # lone   – dark gray
-    1: np.array([0.10, 0.35, 1.00], dtype=np.float32),  # coop   – blue
-    2: np.array([1.00, 0.15, 0.15], dtype=np.float32),  # defect – red
+    0: np.array([0.35, 0.35, 0.35], dtype=np.float32),
+    1: np.array([0.10, 0.35, 1.00], dtype=np.float32),
+    2: np.array([1.00, 0.15, 0.15], dtype=np.float32),
 }
 
 _LAYER_META = [
@@ -42,26 +32,14 @@ _LAYER_META = [
     (2, "Defectors",   _PT_RGBA[2]),
 ]
 
-# Edge colour encodes the logical operation each cell carries in its genome
+# Point-edge colour encodes the genome's logical operation
 _OP_EDGE_RGBA: Dict[str, List[float]] = {
-    "AND":  [0.05, 0.88, 0.35, 1.0],  # green
-    "OR":   [1.00, 0.55, 0.00, 1.0],  # orange
-    "XOR":  [0.72, 0.10, 1.00, 1.0],  # purple
-    "NAND": [0.00, 0.88, 0.95, 1.0],  # cyan
+    "AND":  [0.05, 0.88, 0.35, 1.0],
+    "OR":   [1.00, 0.55, 0.00, 1.0],
+    "XOR":  [0.72, 0.10, 1.00, 1.0],
+    "NAND": [0.00, 0.88, 0.95, 1.0],
 }
 _OP_HEX = {"AND": "#0EE059", "OR": "#FF8C00", "XOR": "#B81AFF", "NAND": "#00E0F2"}
-
-
-# RGBA fill colours for each operation (semi-transparent region tiles)
-_OP_REGION_RGBA = {
-    "AND":  np.array([0.05, 0.88, 0.35, 0.28], dtype=np.float32),
-    "OR":   np.array([1.00, 0.55, 0.00, 0.28], dtype=np.float32),
-    "XOR":  np.array([0.72, 0.10, 1.00, 0.28], dtype=np.float32),
-    "NAND": np.array([0.00, 0.88, 0.95, 0.28], dtype=np.float32),
-}
-# Slightly brighter for multi-step tasks (more alpha)
-_STEP_ALPHA = {1: 0.20, 2: 0.32, 3: 0.45}
-
 
 _ALL_TASKS_VIS = [
     ("AND",), ("OR",), ("XOR",), ("NAND",),
@@ -78,30 +56,23 @@ _OP_RGB = {
 
 
 def _render_task_map(
-    regional_rewards: np.ndarray,  # (n_rows, n_cols, 12) float32, each row sums to 15
+    regional_rewards: np.ndarray,
     grid_width: float,
     grid_height: float,
     res: int,
 ) -> np.ndarray:
-    """
-    Returns (res, res, 4) RGBA uint8 for the reward-vector landscape.
-
-    Hue   = weighted blend of op colours, weighted by total reward attributed
-            to each op across all tasks in the vector.
-    Alpha = 0.15 + 0.40 * (dominant_op_share)  — brighter = more specialised.
-    """
+    """RGBA tile colour = weighted blend of op colours; brighter = more specialised."""
     n_rows, n_cols, _ = regional_rewards.shape
     img  = np.zeros((res, res, 4), dtype=np.float32)
     px_r = res / n_rows
     px_c = res / n_cols
 
-    # Precompute per-task → op index mapping (first op of each task)
     ops = ["AND", "OR", "XOR", "NAND"]
     task_op_idx = np.array([ops.index(t[0]) for t in _ALL_TASKS_VIS], dtype=np.int32)
 
     for r in range(n_rows):
         for c in range(n_cols):
-            vec = regional_rewards[r, c]          # (12,)
+            vec = regional_rewards[r, c]
             op_weights = np.zeros(4, dtype=np.float32)
             for i, oi in enumerate(task_op_idx):
                 op_weights[oi] += vec[i]
@@ -110,12 +81,11 @@ def _render_task_map(
             if total == 0:
                 continue
 
-            # Blend RGB weighted by op contribution
             rgb = np.zeros(3, dtype=np.float32)
             for oi, op in enumerate(ops):
                 rgb += (op_weights[oi] / total) * _OP_RGB[op]
 
-            dominant_share = op_weights.max() / total   # 0.25 (uniform) → 1.0 (pure)
+            dominant_share = op_weights.max() / total
             alpha = 0.15 + 0.45 * dominant_share
 
             r0, r1 = int(r * px_r), int((r + 1) * px_r)
@@ -132,18 +102,13 @@ def _render_task_map(
     return (np.clip(img, 0.0, 1.0) * 255).astype(np.uint8)
 
 
-# ── heatmap renderer ──────────────────────────────────────────────────────────
-
 def _render_heatmap(
     records: List[Dict],
     world_w: float,
     world_h: float,
     res: int,
 ) -> np.ndarray:
-    """
-    Returns (res, res, 3) uint8 RGB heatmap for one time step.
-    Cells are Gaussian blobs alpha-composited over the agarose background.
-    """
+    """Per-type Gaussian density blobs alpha-composited over the agarose background."""
     from scipy.ndimage import gaussian_filter
 
     sx = res / world_w
@@ -160,39 +125,26 @@ def _render_heatmap(
     blurred = {t: gaussian_filter(d, sigma=sigma) for t, d in density.items()}
     glob_max = max(b.max() for b in blurred.values()) + 1e-10
 
-    # Additive cell-colour layer
     cell_img = np.zeros((res, res, 3), np.float32)
     for t, color in _HMAP_RGB.items():
         cell_img += (blurred[t] / glob_max)[:, :, np.newaxis] * color
 
-    # Alpha: how much cell colour displaces the agarose background
     alpha = np.clip(cell_img.max(axis=2, keepdims=True) * 1.8, 0.0, 1.0)
-
-    # Composite cell layer over agarose
     img = AGAROSE_BG * (1.0 - alpha) + np.clip(cell_img, 0.0, 1.0) * alpha
     return (np.clip(img, 0.0, 1.0) * 255).astype(np.uint8)
 
-
-# ── data builder ──────────────────────────────────────────────────────────────
 
 def build_napari_data(
     snapshots: List[Dict],
     grid_width: float,
     grid_height: float,
-) -> Tuple[np.ndarray, Dict[int, np.ndarray], Dict[int, np.ndarray], List[np.ndarray]]:
+) -> Tuple[np.ndarray, Dict[int, np.ndarray], Dict[int, np.ndarray], List[np.ndarray], Dict[int, np.ndarray]]:
     """
-    Returns
-    -------
-    image_stack       : (T, VIS_RES, VIS_RES, 3) uint8 heatmap frames
-    points_by_type    : {type_code → (N, 3) float32}  coords = [t_idx, px, py]
-    edge_colors_by_type: {type_code → (N, 4) float32} RGBA edge colour per point,
-                         encoding the cell's logical operation (AND/OR/XOR/NAND).
-    bond_lines        : list of (2, 3) float32 arrays  [[t,x1,y1],[t,x2,y2]]
+    Returns image_stack (T,res,res,3), points_by_type, edge_colors_by_type,
+    bond_lines (list of (2,3) arrays), sizes_by_type. All spatial coords in
+    world (µm); the image layer is rendered at VIS_RES px and scaled by napari.
     """
-    T  = len(snapshots)
-    # sx/sy only used for heatmap pixel rendering; points and bonds use world (µm) coords directly
-    sx = VIS_RES / grid_width
-    sy = VIS_RES / grid_height
+    T = len(snapshots)
 
     image_stack = np.zeros((T, VIS_RES, VIS_RES, 3), dtype=np.uint8)
     pts:   Dict[int, List] = {0: [], 1: [], 2: []}
@@ -200,9 +152,6 @@ def build_napari_data(
     sizes: Dict[int, List] = {0: [], 1: [], 2: []}
     bond_lines: List[np.ndarray] = []
 
-    # Sizes in µm — range from small (newborn) to larger (near division).
-    # 25% of the cell's physical 10 µm diameter gives ~2.5 µm, clearly visible
-    # without crowding at the 250 µm world scale.
     _PT_SIZE_MIN = 0.75
     _PT_SIZE_MAX = 2.25
 
@@ -213,13 +162,12 @@ def build_napari_data(
             for rec in records:
                 x, y = rec["pos"]
                 t = rec["type"]
-                # Store in world (µm) coords — matches the image layers which use scale=(µm/px)
                 pts[t].append([float(t_idx), x, y])
                 ecols[t].append(_OP_EDGE_RGBA.get(rec.get("op", "AND"), [1, 1, 1, 1]))
                 dp = rec.get("div_progress", 0.0)
                 sizes[t].append(_PT_SIZE_MIN + (_PT_SIZE_MAX - _PT_SIZE_MIN) * dp)
 
-        # Adhesion bonds — nearest-neighbour edges within each cluster only.
+        # Adhesion bonds: nearest-neighbour edges within each cluster only
         for group in snap.get("cluster_groups", []):
             if len(group) < 2:
                 continue
@@ -255,10 +203,7 @@ def build_napari_data(
 # ── info dock widget ──────────────────────────────────────────────────────────
 
 def _make_info_widget(reward_params: Optional[Dict]) -> Tuple:
-    """
-    Returns (container_widget, task_label, selection_label).
-    Both labels should be updated by the caller as the time slider moves.
-    """
+    """Returns (widget, task_label, selection_label) — labels are updated by the slider callback."""
     from qtpy.QtWidgets import QLabel, QWidget, QVBoxLayout
     from qtpy.QtCore import Qt
 
@@ -275,11 +220,9 @@ def _make_info_widget(reward_params: Optional[Dict]) -> Tuple:
     layout.setSpacing(6)
     layout.setContentsMargins(12, 12, 12, 12)
 
-    # hex colours for region tile swatches (opaque versions of the translucent tile fill)
     _tile_hex = {"AND": "#0EE059", "OR": "#FF8C00", "XOR": "#B81AFF", "NAND": "#00E0F2"}
 
     def _swatch(hex_col: str, alpha: float) -> str:
-        """Inline coloured square for the legend."""
         return (
             f"<span style='"
             f"display:inline-block;width:14px;height:14px;"
@@ -371,11 +314,6 @@ def _task_html(task_str: str) -> str:
 
 
 def _selection_html(s: Dict) -> str:
-    """
-    Per-phenotype fitness rate (fitness/age) and the two selection-pressure
-    signals: group-selection gradient (multi_advantage) and individual-
-    selection gradient (coop_advantage).
-    """
     def _col(v: float) -> str:
         if v > 0.05:
             return "#1a8a3a"   # green
@@ -451,11 +389,9 @@ def launch_viewer(
 
     viewer = napari.Viewer(title="Multicellularity Simulation")
 
-    # µm per pixel — napari spatial scale for 2D layers (time axis is handled by dims slider)
-    um_per_px = grid_width / VIS_RES   # e.g. 1000 µm / 400 px = 2.5 µm/px
+    um_per_px     = grid_width / VIS_RES
     spatial_scale = (um_per_px, um_per_px)
 
-    # Set agarose background on the VisPy canvas (visible when zoomed out)
     try:
         viewer.window._qt_viewer.canvas.bgcolor = (
             float(AGAROSE_BG[0]), float(AGAROSE_BG[1]), float(AGAROSE_BG[2]), 1.0
@@ -463,7 +399,6 @@ def launch_viewer(
     except Exception:
         pass
 
-    # ── image layer ───────────────────────────────────────────────────────────
     viewer.add_image(
         image_stack,
         name="environment",
@@ -473,16 +408,14 @@ def launch_viewer(
         scale=spatial_scale,
     )
 
-    # ── regional reward map (time-varying — one frame per snapshot) ──────────
-    # Pull per-frame rewards from snapshots if available; fall back to the
-    # single static array passed in regional_tasks.
+    # Time-varying reward map per frame; fall back to a single static frame
     snap_rewards = [s.get("regional_rewards") for s in snapshots]
     if any(r is not None for r in snap_rewards):
         task_map_stack = np.stack([
             _render_task_map(r if r is not None else snap_rewards[0],
                              grid_width, grid_height, VIS_RES)
             for r in snap_rewards
-        ], axis=0)  # (T, res, res, 4)
+        ], axis=0)
         viewer.add_image(
             task_map_stack,
             name="Reward regions",
@@ -502,11 +435,9 @@ def launch_viewer(
             scale=spatial_scale,
         )
 
-    # ── native scale bar ──────────────────────────────────────────────────────
     viewer.scale_bar.visible = True
     viewer.scale_bar.unit    = "µm"
 
-    # ── adhesion bonds (clustered cells only) ─────────────────────────────────
     if bond_lines:
         bonds_layer = viewer.add_shapes(
             data=bond_lines,
@@ -519,7 +450,6 @@ def launch_viewer(
         )
         bonds_layer.opacity = 0.70
 
-    # ── border rectangle (simulation wall) — in µm coords ────────────────────
     border = np.array([[0, 0], [0, grid_height], [grid_width, grid_height], [grid_width, 0]], dtype=float)
     border_layer = viewer.add_shapes(
         [border],
@@ -532,7 +462,6 @@ def launch_viewer(
     )
     border_layer.opacity = 0.85
 
-    # ── cell point clouds ─────────────────────────────────────────────────────
     for ctype, layer_name, face_color in _LAYER_META:
         pts = points_by_type[ctype]
         if len(pts) == 0:
@@ -552,13 +481,11 @@ def launch_viewer(
 
     viewer.dims.axis_labels = ("time", "x", "y")
 
-    # ── dock widget ───────────────────────────────────────────────────────────
     info_widget, task_label, selection_label = _make_info_widget(reward_params)
     viewer.window.add_dock_widget(info_widget, name="Simulation Info", area="right")
     task_label.setText(_task_html(snapshots[0].get("current_task", "(A AND B) XOR C")))
     selection_label.setText(_selection_html(snapshots[0]))
 
-    # ── title bar + slider callback ───────────────────────────────────────────
     def _title(t_idx: int) -> str:
         s = snapshots[t_idx]
         return (

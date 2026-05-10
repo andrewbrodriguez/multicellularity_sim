@@ -8,8 +8,7 @@ def main() -> None:
         mutation_rate=0.001,
         seed=42,
     )
-    print("Multicellularity Simulation")
-    print("Genome: 8-bit  |  Task: (A AND B) XOR C  |  Replication: cluster-level")
+    print("Multicellularity Simulation — headless smoke run")
     print("-" * 75)
     stats = sim.run(ticks=500, record_every=25)
     print("-" * 75)
